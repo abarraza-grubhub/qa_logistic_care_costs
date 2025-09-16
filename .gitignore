@@ -205,3 +205,23 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Data files (large datasets should not be committed)
+data/raw/*.csv
+data/raw/*.xlsx
+data/raw/*.parquet
+data/processed/*.csv
+data/processed/*.xlsx
+data/processed/*.parquet
+data/external/*.csv
+data/external/*.xlsx
+data/external/*.parquet
+data/interim/*.csv
+data/interim/*.xlsx
+data/interim/*.parquet
+
+# Keep structure but not large data files
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/external/.gitkeep
+!data/interim/.gitkeep
