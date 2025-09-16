@@ -1,0 +1,49 @@
+[tool.ruff]
+target-version = "py39"
+exclude = [
+    "*.csv",
+    "*.json",
+    "*.ipynb",
+    ".venv/",
+    ".git/",
+    ".dvc/"
+]
+# Increasing line length.
+line-length = 120
+
+[tool.ruff.lint]
+# Rules we want Ruff to enforce.
+# E/W: is for PEP 8 style checks (pycodestyle).
+# F:   is for logical error checking (Pyflakes).
+# I:   is for import sorting (isort).
+# B:   is for finding subtle bugs (flake8-bugbear).
+# C90: is for code complexity checks (mccabe).
+# N:   is for PEP 8 naming conventions (pep8-naming).
+# D:   is for docstring conventions (pydocstyle).
+# UP:  is for modernizing Python syntax (pyupgrade).
+# PL:  is for pylint rules.
+# ANN: is for type annotations (pylint-annotations).
+select = ["E", "F", "I", "B", "W", "C90", "N", "D", "PL", "UP", "ANN"]
+ignore = [
+    "D100",  # Missing docstring in public module
+    "D104",  # Missing docstring in public package
+    "D205",  # 1 blank line required between summary line and description
+    "D212",  # Multi-line docstring summary should start at the first line
+    "PLR0913", # Too many arguments in function definition (X > 5)
+    "ANN003", # Missing type annotation for kwargs argument
+    "ANN204", # Missing return type annotation for special method like `__init__`
+    "D101",  # Missing docstring in public class
+    "D102",  # Missing docstring in public method
+    "D103",  # Missing docstring in public function
+    "D107",  # Missing docstring in __init__
+    "ANN", # Ignore all type annotation errors
+]
+
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "ANN", # Ignore all type annotation errors
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
