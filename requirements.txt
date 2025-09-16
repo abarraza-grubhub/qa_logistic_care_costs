@@ -1,0 +1,14 @@
+# Core data science libraries
+pandas>=1.5.0
+numpy>=1.21.0
+
+# Visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Jupyter
+jupyter>=1.0.0
+jupyterlab>=3.4.0
+
+# Analysis and modeling
+scikit-learn>=1.1.0

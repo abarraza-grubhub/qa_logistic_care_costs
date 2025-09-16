@@ -1,0 +1,12 @@
+# Development tools
+black>=22.0.0
+pytest>=7.0.0
+pytest-cov>=3.0.0
+pre-commit>=2.20.0
+
+# Type checking
+mypy>=0.971
+pandas-stubs
+
+# Documentation
+sphinx>=5.0.0
