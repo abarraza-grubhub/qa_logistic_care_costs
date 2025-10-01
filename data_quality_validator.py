@@ -22,8 +22,100 @@ Version: 2.0 (Enhanced with severity levels and SQL-specific validations)
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, Union
 import warnings
+import logging
+import os
+from pathlib import Path
+
+
+# Configure logging for the validator
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+class ValidationConfig:
+    """Configuration class for data quality validation parameters."""
+    
+    def __init__(self):
+        """Initialize with default validation parameters."""
+        # Monetary value thresholds
+        self.monetary_thresholds = {
+            'driver_pay_per_order': 500,
+            'tip': 500,
+            'total_care_cost': 1000,
+            'cp_care_concession_awarded_amount': 1000,
+            'default': 10000
+        }
+        
+        # Expected negative columns
+        self.expected_negative_columns = [
+            'cp_diner_adj', 'total_care_cost', 'cp_care_concession_awarded_amount'
+        ]
+        
+        # Expected categorical values
+        self.expected_categorical_values = {
+            'ghd_ind': ['ghd', 'non-ghd'],
+            'CA_Market': ['CA', 'xCA'],
+            'NYC_Market': ['DCWP', 'xDCWP'],
+            'cany_ind': ['CA', 'DCWP', 'ROM'],
+            'eta_care_reasons': ['ETA Issues', 'Other']
+        }
+        
+        # Critical issue types
+        self.critical_issue_types = [
+            'date_range_violation', 'logical_inconsistency', 
+            'business_logic_violation', 'order_count_mismatch'
+        ]
+        
+        # Data quality scoring weights
+        self.scoring_weights = {
+            'critical': 10,
+            'high': 5,
+            'medium': 2,
+            'low': 1
+        }
+    
+    @classmethod
+    def from_dict(cls, config_dict: Dict[str, Any]) -> 'ValidationConfig':
+        """Create config from dictionary."""
+        config = cls()
+        for key, value in config_dict.items():
+            if hasattr(config, key):
+                setattr(config, key, value)
+        return config
+    
+    @classmethod
+    def from_file(cls, config_path: Union[str, Path]) -> 'ValidationConfig':
+        """Load configuration from JSON file."""
+        import json
+        config_path = Path(config_path)
+        
+        if not config_path.exists():
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+        
+        with open(config_path, 'r') as f:
+            config_dict = json.load(f)
+        
+        return cls.from_dict(config_dict)
+    
+    def save_to_file(self, config_path: Union[str, Path]) -> None:
+        """Save configuration to JSON file."""
+        import json
+        config_path = Path(config_path)
+        
+        config_dict = {
+            'monetary_thresholds': self.monetary_thresholds,
+            'expected_negative_columns': self.expected_negative_columns,
+            'expected_categorical_values': self.expected_categorical_values,
+            'critical_issue_types': self.critical_issue_types,
+            'scoring_weights': self.scoring_weights
+        }
+        
+        with open(config_path, 'w') as f:
+            json.dump(config_dict, f, indent=2)
+        
+        print(f"Configuration saved to: {config_path}")
 
 
 class DataQualityValidator:
@@ -35,7 +127,8 @@ class DataQualityValidator:
     documented in "Breaking Down Logistic Care Costs Query.md".
     """
     
-    def __init__(self, start_date: str, end_date: str, validation_level: str = 'full'):
+    def __init__(self, start_date: str, end_date: str, validation_level: str = 'full',
+                 config: Optional[ValidationConfig] = None):
         """
         Initialize validator with date parameters.
         
@@ -46,11 +139,32 @@ class DataQualityValidator:
                 - 'full': Run all validation checks
                 - 'basic': Run essential checks only (date, monetary, aggregation)
                 - 'critical_only': Run only critical business logic checks
+            config: Optional ValidationConfig object for custom parameters
+        
+        Raises:
+            ValueError: If date format is invalid or end_date is before start_date
         """
-        self.start_date = pd.to_datetime(start_date)
-        self.end_date = pd.to_datetime(end_date)
+        # Validate and parse dates
+        try:
+            self.start_date = pd.to_datetime(start_date)
+            self.end_date = pd.to_datetime(end_date)
+        except Exception as e:
+            raise ValueError(f"Invalid date format. Please use YYYY-MM-DD format. Error: {e}")
+        
+        if self.end_date < self.start_date:
+            raise ValueError("end_date must be greater than or equal to start_date")
+        
+        # Validate validation level
+        valid_levels = ['full', 'basic', 'critical_only']
+        if validation_level not in valid_levels:
+            raise ValueError(f"validation_level must be one of: {valid_levels}")
+        
         self.validation_level = validation_level
+        self.config = config or ValidationConfig()
         self.validation_results = []
+        
+        # Configure logging
+        self.logger = logger
         
         # Define validation levels
         self.validation_configs = {
@@ -193,15 +307,8 @@ class DataQualityValidator:
                 col_data = pd.to_numeric(df[col], errors='coerce')
                 
                 # Check for unreasonably large positive values (contextual based on column)
-                if col in ['driver_pay_per_order', 'tip']:
-                    # Driver pay and tips should be reasonable per-order amounts
-                    large_threshold = 500  # $500 per order seems high for tips/driver pay
-                elif col in ['total_care_cost', 'cp_care_concession_awarded_amount']:
-                    # Care costs can be higher but still should be reasonable
-                    large_threshold = 1000  # $1000 per order for care costs
-                else:
-                    # General threshold for other monetary columns
-                    large_threshold = 10000
+                large_threshold = self.config.monetary_thresholds.get(col, 
+                                                                    self.config.monetary_thresholds['default'])
                 
                 large_values = col_data[col_data > large_threshold]
                 if not large_values.empty:
@@ -219,9 +326,7 @@ class DataQualityValidator:
                 negative_values = col_data[col_data < 0]
                 
                 # For some columns, negative values are expected (refunds, adjustments)
-                expected_negative_columns = ['cp_diner_adj', 'total_care_cost', 'cp_care_concession_awarded_amount']
-                
-                if not negative_values.empty and col not in expected_negative_columns:
+                if not negative_values.empty and col not in self.config.expected_negative_columns:
                     issues.append({
                         'type': 'unexpected_negative_value',
                         'column': col,
@@ -251,15 +356,7 @@ class DataQualityValidator:
         issues = []
         
         # Expected categorical mappings based on the query
-        expected_values = {
-            'ghd_ind': ['ghd', 'non-ghd'],
-            'CA_Market': ['CA', 'xCA'],
-            'NYC_Market': ['DCWP', 'xDCWP'],
-            'cany_ind': ['CA', 'DCWP', 'ROM'],
-            'eta_care_reasons': ['ETA Issues', 'Other']
-        }
-        
-        for col, expected in expected_values.items():
+        for col, expected in self.config.expected_categorical_values.items():
             if col in df.columns:
                 unique_values = df[col].unique()
                 unexpected_values = set(unique_values) - set(expected) - {np.nan, None}
@@ -439,7 +536,22 @@ class DataQualityValidator:
             
         Returns:
             Dictionary containing validation results
+            
+        Raises:
+            ValueError: If DataFrame is empty or invalid
+            TypeError: If input is not a pandas DataFrame
         """
+        # Input validation
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Input must be a pandas DataFrame")
+        
+        if df.empty:
+            raise ValueError("DataFrame cannot be empty")
+        
+        self.logger.info(f"Starting data quality validation for {len(df)} records")
+        self.logger.info(f"Date range: {self.start_date.date()} to {self.end_date.date()}")
+        self.logger.info(f"Validation level: {self.validation_level}")
+        
         print(f"Starting data quality validation for {len(df)} records...")
         print(f"Date range: {self.start_date.date()} to {self.end_date.date()}")
         print(f"Validation level: {self.validation_level}")
@@ -465,26 +577,40 @@ class DataQualityValidator:
         validation_methods = [(name, method) for name, method in all_validation_methods 
                              if name in selected_methods]
         
+        validation_start_time = datetime.now()
+        
         for check_name, method in validation_methods:
             print(f"Running {check_name}...")
+            method_start_time = datetime.now()
+            
             try:
                 issues = method(df)
                 all_issues.extend(issues)
-                print(f"  Found {len(issues)} issues")
+                method_duration = (datetime.now() - method_start_time).total_seconds()
+                print(f"  Found {len(issues)} issues (completed in {method_duration:.2f}s)")
+                self.logger.info(f"{check_name}: {len(issues)} issues found in {method_duration:.2f}s")
+                
             except Exception as e:
                 error_issue = {
                     'type': 'validation_error',
                     'check': check_name,
-                    'description': f'Error during {check_name}: {str(e)}'
+                    'description': f'Error during {check_name}: {str(e)}',
+                    'severity': 'high'
                 }
                 all_issues.append(error_issue)
                 print(f"  Error: {str(e)}")
+                self.logger.error(f"Error in {check_name}: {str(e)}")
+        
+        total_duration = (datetime.now() - validation_start_time).total_seconds()
+        self.logger.info(f"Validation completed in {total_duration:.2f}s")
         
         # Compile summary statistics
         summary = {
             'total_records': len(df),
             'total_issues': len(all_issues),
             'date_range': f"{self.start_date.date()} to {self.end_date.date()}",
+            'validation_level': self.validation_level,
+            'validation_duration': total_duration,
             'issues_by_type': {},
             'critical_issues': [],
             'all_issues': all_issues
@@ -496,13 +622,7 @@ class DataQualityValidator:
             summary['issues_by_type'][issue_type] = summary['issues_by_type'].get(issue_type, 0) + 1
             
             # Flag critical issues based on type and severity
-            critical_types = [
-                'date_range_violation', 'logical_inconsistency', 
-                'business_logic_violation', 'order_count_mismatch'
-            ]
-            
-            # Also consider high severity issues as critical
-            is_critical = (issue_type in critical_types) or (issue.get('severity') == 'high')
+            is_critical = (issue_type in self.config.critical_issue_types) or (issue.get('severity') == 'high')
             
             if is_critical:
                 summary['critical_issues'].append(issue)
