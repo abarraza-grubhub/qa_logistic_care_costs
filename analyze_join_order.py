@@ -47,6 +47,7 @@ class SQLJoinAnalyzer:
         self.tables: Dict[str, TableInfo] = {}
         self.sql_content = ""
         self.context_content = ""
+        self.table_context_info = {}  # Store information from context document
         
     def load_files(self) -> None:
         """Load SQL and context files."""
@@ -60,20 +61,53 @@ class SQLJoinAnalyzer:
         try:
             with open(self.context_file_path, 'r', encoding='utf-8') as f:
                 self.context_content = f.read()
+            self._parse_context_info()
         except FileNotFoundError:
             print(f"Warning: Context file not found: {self.context_file_path}")
             self.context_content = ""
+    
+    def _parse_context_info(self) -> None:
+        """Extract table information from the context document."""
+        if not self.context_content:
+            return
+        
+        # Look for table descriptions in the context
+        table_info_patterns = [
+            # Look for table descriptions in the data sources section
+            (r'(\w+\.[\w_]+)\s+.*Contains.*', 'description'),
+            (r'(\w+\.[\w_]+)\s+.*fact table.*', 'large'),
+            (r'(\w+\.[\w_]+)\s+.*reference table.*', 'small'),
+            (r'(\w+\.[\w_]+)\s+.*dimension.*', 'medium'),
+            (r'(\w+\.[\w_]+)\s+.*lookup.*', 'small'),
+        ]
+        
+        for pattern, info_type in table_info_patterns:
+            matches = re.findall(pattern, self.context_content, re.IGNORECASE)
+            for match in matches:
+                table_name = self.extract_table_name(match)
+                if table_name not in self.table_context_info:
+                    self.table_context_info[table_name] = {}
+                if info_type in ['large', 'medium', 'small']:
+                    self.table_context_info[table_name]['size_hint'] = info_type
+                elif info_type == 'description':
+                    self.table_context_info[table_name]['has_description'] = True
     
     def categorize_table_size(self, table_name: str) -> str:
         """
         Categorize table size based on naming conventions and context information.
         
         This is a heuristic approach based on:
-        1. Table naming patterns
-        2. Context document information
+        1. Context document information
+        2. Table naming patterns
         3. Common data warehouse patterns
         """
         table_lower = table_name.lower()
+        
+        # First check if we have context information about this table
+        if table_name in self.table_context_info:
+            size_hint = self.table_context_info[table_name].get('size_hint')
+            if size_hint:
+                return size_hint
         
         # Large tables (fact tables, operational data)
         large_table_patterns = [
@@ -170,10 +204,12 @@ class SQLJoinAnalyzer:
                 right_table_part = join_match.group(2).strip()
                 
                 # Handle case where table is on the next line
+                table_line_idx = i
                 if not right_table_part and i < len(lines):
                     next_line = lines[i].strip()
                     if next_line and not next_line.startswith('ON'):
                         right_table_part = next_line
+                        table_line_idx = i + 1
                 
                 if not right_table_part:
                     continue
@@ -184,8 +220,8 @@ class SQLJoinAnalyzer:
                 # Find the left table by looking at the preceding FROM or JOIN
                 left_table = self._find_left_table(lines, i)
                 
-                # Extract join condition (ON clause)
-                join_condition = self._extract_join_condition(lines, i)
+                # Extract join condition (ON clause) - start looking from the table line
+                join_condition = self._extract_join_condition(lines, table_line_idx)
                 
                 join_clause = JoinClause(
                     join_type=join_type,
@@ -248,36 +284,61 @@ class SQLJoinAnalyzer:
         
         return "unknown"
     
-    def _extract_join_condition(self, lines: List[str], join_line_idx: int) -> str:
+    def _extract_join_condition(self, lines: List[str], start_idx: int) -> str:
         """Extract the ON condition for a JOIN."""
         condition_lines = []
         
-        # Start from the JOIN line and look for ON clause (within a reasonable distance)
-        for i in range(join_line_idx - 1, min(len(lines), join_line_idx + 10)):
+        # Look for ON clause starting from the given position
+        for i in range(start_idx, min(len(lines), start_idx + 8)):
             line = lines[i].strip()
             
-            if re.search(r'\bON\b', line, re.IGNORECASE):
-                # Found ON clause, collect condition
-                on_part = re.search(r'ON\s+(.+)', line, re.IGNORECASE)
-                if on_part:
-                    condition_lines.append(on_part.group(1))
+            # Skip empty lines and comments
+            if not line or line.startswith('--'):
+                continue
+            
+            # Found ON clause
+            if re.search(r'^\s*ON\b', line, re.IGNORECASE):
+                # Extract the condition part
+                on_match = re.search(r'ON\s+(.+)', line, re.IGNORECASE)
+                if on_match:
+                    condition_lines.append(on_match.group(1).strip())
                 
-                # Continue collecting if condition spans multiple lines
+                # Continue collecting multi-line conditions
                 for j in range(i + 1, min(len(lines), i + 5)):
                     next_line = lines[j].strip()
-                    if (next_line and 
-                        not re.search(r'^\s*(AND\s+(?:\w+\.)?(?:ticket_created_|business_|cancellation_|order_)date|FROM|WHERE|GROUP|ORDER|LEFT|RIGHT|INNER|JOIN|SELECT|\))', next_line, re.IGNORECASE) and
-                        not next_line.startswith('--')):
+                    
+                    # Skip comments and empty lines
+                    if not next_line or next_line.startswith('--'):
+                        continue
+                    
+                    # Check if this line is a continuation of the condition
+                    if re.search(r'^\s*AND\s+', next_line, re.IGNORECASE):
                         condition_lines.append(next_line)
+                    elif re.search(r'^\s*(LEFT\s+JOIN|RIGHT\s+JOIN|INNER\s+JOIN|FULL\s+JOIN|JOIN|FROM|WHERE|GROUP|ORDER|SELECT|\))', next_line, re.IGNORECASE):
+                        # Stop if we hit a new clause
+                        break
+                    # If it's not a clear stop word and doesn't start with AND, it might still be part of the condition
+                    # But let's be conservative and stop here
                     else:
                         break
+                
                 break
             
-            # Stop if we hit another JOIN, FROM, WHERE, etc.
-            if re.search(r'^\s*(FROM|WHERE|GROUP|ORDER|LEFT\s+JOIN|RIGHT\s+JOIN|INNER\s+JOIN|JOIN)', line, re.IGNORECASE):
+            # Stop if we hit another major clause without finding ON
+            elif re.search(r'^\s*(LEFT\s+JOIN|RIGHT\s+JOIN|INNER\s+JOIN|FULL\s+JOIN|JOIN|FROM|WHERE|GROUP|ORDER|SELECT)', line, re.IGNORECASE):
                 break
         
-        return ' '.join(condition_lines).strip()
+        condition_text = ' '.join(condition_lines).strip()
+        
+        # Clean up the condition text
+        if condition_text:
+            # Remove extra whitespace
+            condition_text = re.sub(r'\s+', ' ', condition_text)
+            # Truncate if too long for display
+            if len(condition_text) > 120:
+                condition_text = condition_text[:117] + "..."
+        
+        return condition_text or "Not found"
     
     def _register_table(self, table_name: str, full_reference: str) -> None:
         """Register a table with its metadata."""
@@ -317,7 +378,8 @@ class SQLJoinAnalyzer:
                 'join_condition': join.join_condition,
                 'issue': None,
                 'suggested_order': None,
-                'priority': 'low'
+                'priority': 'low',
+                'performance_impact': 'Low'
             }
             
             # Check for size-based optimization opportunities
@@ -329,6 +391,7 @@ class SQLJoinAnalyzer:
                 recommendation['issue'] = f"Large table ({join.right_table}) should typically be on the left side of JOIN for better performance"
                 recommendation['suggested_order'] = f"{join.right_table} {join.join_type} {join.left_table}"
                 recommendation['priority'] = 'high'
+                recommendation['performance_impact'] = 'High - can significantly reduce query execution time'
             
             elif (right_table_info.size_category == 'medium' and 
                   left_table_info.size_category == 'small' and
@@ -337,12 +400,21 @@ class SQLJoinAnalyzer:
                 recommendation['issue'] = f"Medium table ({join.right_table}) should typically be on the left side when joining with small table for better performance"
                 recommendation['suggested_order'] = f"{join.right_table} {join.join_type} {join.left_table}"
                 recommendation['priority'] = 'medium'
+                recommendation['performance_impact'] = 'Medium - moderate performance improvement expected'
             
             elif (right_table_info.size_category == 'large' and 
                   left_table_info.size_category == 'derived'):
                 recommendation['issue'] = f"Consider the size of derived table ({join.left_table}) - if small, consider moving large table ({join.right_table}) to the left"
                 recommendation['suggested_order'] = f"Depends on derived table size: possibly {join.right_table} {join.join_type} {join.left_table}"
                 recommendation['priority'] = 'info'
+                recommendation['performance_impact'] = 'Variable - depends on derived table size'
+            
+            # Check for potential Cartesian product risks
+            if join.join_condition == "Not found":
+                existing_issue = recommendation.get('issue', '') or ''
+                recommendation['issue'] = existing_issue + f" WARNING: No JOIN condition found - potential Cartesian product!"
+                recommendation['priority'] = 'critical'
+                recommendation['performance_impact'] = 'Critical - may cause query to hang or fail'
             
             # Always add the recommendation (even if no issue) for completeness
             recommendations.append(recommendation)
@@ -367,7 +439,9 @@ class SQLJoinAnalyzer:
         high_priority = sum(1 for r in recommendations if r['priority'] == 'high')
         medium_priority = sum(1 for r in recommendations if r['priority'] == 'medium')
         info_priority = sum(1 for r in recommendations if r['priority'] == 'info')
+        critical_priority = sum(1 for r in recommendations if r['priority'] == 'critical')
         
+        report.append(f"- Critical issues: {critical_priority}")
         report.append(f"- High priority optimization opportunities: {high_priority}")
         report.append(f"- Medium priority optimization opportunities: {medium_priority}")
         report.append(f"- Informational notes: {info_priority}")
@@ -400,11 +474,16 @@ class SQLJoinAnalyzer:
             report.append(f"- Left table size: {rec['left_size']}")
             report.append(f"- Right table size: {rec['right_size']}")
             report.append(f"- Join condition: `{rec['join_condition']}`")
+            report.append(f"- Performance impact: {rec['performance_impact']}")
             
             if rec['issue']:
                 if rec['priority'] == 'info':
                     report.append(f"- ℹ️  **INFO**: {rec['issue']}")
                     report.append(f"- 💡 **Suggestion**: {rec['suggested_order']}")
+                elif rec['priority'] == 'critical':
+                    report.append(f"- 🚨 **CRITICAL**: {rec['issue']}")
+                    if rec['suggested_order']:
+                        report.append(f"- 💡 **Suggested**: `{rec['suggested_order']}`")
                 else:
                     report.append(f"- ⚠️  **{rec['priority'].upper()} PRIORITY**: {rec['issue']}")
                     report.append(f"- 💡 **Suggested**: `{rec['suggested_order']}`")
@@ -414,12 +493,19 @@ class SQLJoinAnalyzer:
             report.append("")
         
         # Recommendations summary
-        if high_priority > 0 or medium_priority > 0 or info_priority > 0:
+        if critical_priority > 0 or high_priority > 0 or medium_priority > 0 or info_priority > 0:
             report.append("## Key Recommendations")
             report.append("")
             
+            if critical_priority > 0:
+                report.append("### 🚨 Critical Issues (Immediate Action Required)")
+                for rec in recommendations:
+                    if rec['priority'] == 'critical':
+                        report.append(f"- **Line {rec['line_number']}** in CTE '{rec['cte_name']}': {rec['issue']}")
+                report.append("")
+            
             if high_priority > 0:
-                report.append("### High Priority Issues")
+                report.append("### ⚠️ High Priority Issues")
                 for rec in recommendations:
                     if rec['priority'] == 'high':
                         report.append(f"- **Line {rec['line_number']}** in CTE '{rec['cte_name']}': {rec['issue']}")

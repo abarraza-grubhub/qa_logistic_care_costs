@@ -209,3 +209,6 @@
 - Actual table sizes may vary and should be verified with database statistics
 - JOIN order optimization impact depends on the query optimizer and database system
 - Consider creating database statistics or using EXPLAIN PLAN for definitive optimization
+
+
+Report saved to: join_order_analysis_report.md
