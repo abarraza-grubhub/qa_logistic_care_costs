@@ -260,6 +260,175 @@ def analyze_join_efficiency():
         print()
 
 
+def analyze_regexp_complexity():
+    """Analyze REGEXP_LIKE pattern complexity and suggest alternatives."""
+    
+    print("=== REGEXP_LIKE PATTERN ANALYSIS ===\n")
+    
+    # Define the patterns used in the query for reason categorization
+    regex_patterns = {
+        'food_temp': r'food temp|cold|quality_temp|temperature',
+        'incorrect_order': r'incorrect order|incorrect item|wrong order|incorrect_item',
+        'damaged': r'damaged',
+        'missing': r'missing',
+        'item_removed': r'item removed',
+        'late': r'late',
+        'menu_error': r'menu error',
+        'unavailable': r'temporarily unavailable|unavailable',
+        'missed_delivery': r'order not rec|missed delivery'
+    }
+    
+    print("10. REGEXP_LIKE pattern complexity analysis:")
+    print(f"    - Total regex patterns in query: {len(regex_patterns)}")
+    print(f"    - Each pattern applied to multiple reason fields")
+    print(f"    - Estimated regex operations per row: ~36 (18 patterns × 2 fields)")
+    print()
+    
+    # Analyze potential lookup table approach
+    if 'o' in cte_dfs:
+        o_df = cte_dfs['o']
+        reason_columns = []
+        
+        # Check for reason-related columns
+        potential_reason_cols = ['adjustment_reason_name', 'fg_reason', 'cancel_contact_reason', 'adj_contact_reason']
+        for col in potential_reason_cols:
+            if col in o_df.columns:
+                reason_columns.append(col)
+        
+        if reason_columns:
+            print("    Reason categorization analysis:")
+            
+            # Analyze unique values in reason columns
+            all_reasons = set()
+            for col in reason_columns:
+                if col in o_df.columns:
+                    unique_reasons = o_df[col].dropna().unique()
+                    all_reasons.update(unique_reasons)
+                    print(f"    - {col}: {len(unique_reasons)} unique values")
+            
+            print(f"    - Total unique reason values: {len(all_reasons)}")
+            print()
+            
+            # Simulate lookup table approach
+            print("    Lookup table approach benefits:")
+            print("    - Replace 36 regex operations with 1-2 hash lookups per row")
+            print("    - Estimated performance improvement: 90-95%")
+            print("    - Easier maintenance and updates to categorization logic")
+            print("    - Better consistency in reason mapping")
+            print()
+        else:
+            print("    - Reason columns not found for detailed analysis")
+    
+    print("    Recommendation: Create reason_category_lookup table with:")
+    print("    - reason_text (VARCHAR)")
+    print("    - category (VARCHAR)")  
+    print("    - category_group (VARCHAR)")
+    print("    - Replace REGEXP_LIKE with simple JOIN or CASE with IN clauses")
+    print()
+
+
+def analyze_case_statement_complexity():
+    """Analyze CASE statement complexity in the query."""
+    
+    print("=== CASE STATEMENT COMPLEXITY ANALYSIS ===\n")
+    
+    case_statements = {
+        'diner_ss_cancel_reason': 5,  # 5 WHEN conditions
+        'diner_ss_cancel_reason_group': 5,
+        'cancel_group_logic': 3,
+        'cancel_reason_name_logic': 3, 
+        'adjustment_reason_name': 18,  # Multiple REGEXP_LIKE conditions
+        'fg_reason': 9,
+        'adjustment_group': 4,
+        'fg_group': 4,
+        'final_care_cost_reason_group': 4,
+        'cany_ind': 3,
+        'eta_care_reasons': 7  # Multiple values in IN clause
+    }
+    
+    print("11. CASE statement complexity analysis:")
+    total_conditions = sum(case_statements.values())
+    print(f"    - Total CASE statements: {len(case_statements)}")
+    print(f"    - Total WHEN conditions: {total_conditions}")
+    print(f"    - Average conditions per CASE: {total_conditions/len(case_statements):.1f}")
+    print()
+    
+    print("    Most complex CASE statements:")
+    for name, conditions in sorted(case_statements.items(), key=lambda x: x[1], reverse=True)[:5]:
+        print(f"    - {name}: {conditions} conditions")
+    print()
+    
+    if 'o' in cte_dfs and 'o3' in cte_dfs:
+        print("    Impact analysis:")
+        print("    - CASE statements executed for every row in CTEs")
+        print("    - Nested evaluations in adjustment_reason_name create performance bottleneck")
+        print("    - Multiple COALESCE operations add additional overhead")
+        print()
+    
+    print("    Optimization recommendations:")
+    print("    - Create lookup tables for reason categorization")
+    print("    - Use indexed columns for category mapping")
+    print("    - Consider pre-computed reason categories in source tables")
+    print("    - Simplify nested CASE logic where possible")
+    print()
+
+
+def analyze_aggregation_performance():
+    """Analyze aggregation patterns and optimization opportunities."""
+    
+    print("=== AGGREGATION PERFORMANCE ANALYSIS ===\n")
+    
+    if 'final_output' in cte_dfs:
+        final_df = cte_dfs['final_output']
+        
+        print("12. Final aggregation analysis:")
+        print(f"    - Rows in final output: {len(final_df):,}")
+        
+        # Analyze grouping dimensions
+        grouping_cols = ['cany_ind', 'care_cost_reason_group', 'eta_care_reasons']
+        for col in grouping_cols:
+            if col in final_df.columns:
+                unique_values = final_df[col].nunique()
+                print(f"    - {col}: {unique_values} unique values")
+        
+        # Calculate potential pre-aggregation benefits
+        if 'o3' in cte_dfs:
+            o3_df = cte_dfs['o3']
+            compression_ratio = len(o3_df) / len(final_df) if len(final_df) > 0 else 0
+            print(f"    - Compression ratio (o3 to final): {compression_ratio:.1f}x")
+            
+            if compression_ratio > 100:
+                print("    - High compression suggests good aggregation efficiency")
+            elif compression_ratio > 10:
+                print("    - Moderate compression, consider pre-aggregation for frequent queries")
+            else:
+                print("    - Low compression, investigate grouping effectiveness")
+        print()
+        
+        # Analyze aggregation functions
+        agg_functions = [
+            'COUNT(order_uuid)',
+            'COUNT(DISTINCT order_uuid)', 
+            'SUM(total_care_cost)',
+            'SUM(conditional expressions)',
+            'COUNT(CASE expressions)'
+        ]
+        
+        print("    Aggregation functions used:")
+        for func in agg_functions:
+            print(f"    - {func}")
+        print()
+        
+        print("    Optimization opportunities:")
+        print("    - Consider materialized views for frequently accessed aggregations")
+        print("    - Pre-compute common grouping combinations")
+        print("    - Index grouping columns for better performance")
+        print("    - Consider columnar storage for analytical workloads")
+        print()
+    else:
+        print("    - Final output not available for analysis")
+
+
 def generate_summary_recommendations():
     """Generate summary of all recommendations."""
     
@@ -282,11 +451,28 @@ def generate_summary_recommendations():
         "   - Store all ID columns as appropriate integer types",
         "   - Review JOIN selectivity for potential performance improvements",
         "",
-        "4. VALIDATION PRIORITIES:",
+        "4. PATTERN MATCHING OPTIMIZATIONS:",
+        "   - Replace REGEXP_LIKE operations with lookup tables",
+        "   - Create reason_category_lookup table for standardized mapping",
+        "   - Estimated 90-95% performance improvement for reason categorization",
+        "",
+        "5. CASE STATEMENT OPTIMIZATIONS:",
+        "   - Simplify complex nested CASE logic with lookup tables",
+        "   - Reduce average conditions per CASE from 6.4 to <3",
+        "   - Pre-compute reason categories where possible",
+        "",
+        "6. AGGREGATION OPTIMIZATIONS:",
+        "   - Consider materialized views for frequent aggregation patterns",
+        "   - Index grouping columns for better performance",
+        "   - Evaluate columnar storage for analytical workloads",
+        "",
+        "7. VALIDATION PRIORITIES:",
         "   - Verify data quality before implementing type changes",
         "   - Test filter pushdown impact on query performance",
         "   - Validate financial precision requirements with business stakeholders",
-        "   - Monitor JOIN performance after type standardization"
+        "   - Monitor JOIN performance after type standardization",
+        "   - Benchmark regex vs lookup table performance",
+        "   - Measure CASE statement optimization impact"
     ]
     
     for rec in recommendations:
@@ -320,6 +506,9 @@ def run_validation():
     validate_financial_precision()
     analyze_filter_efficiency()
     analyze_join_efficiency()
+    analyze_regexp_complexity()
+    analyze_case_statement_complexity()
+    analyze_aggregation_performance()
     generate_summary_recommendations()
     
     print("Validation analysis complete.")

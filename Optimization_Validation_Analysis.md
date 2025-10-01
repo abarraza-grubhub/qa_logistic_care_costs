@@ -25,7 +25,9 @@ Based on column names, context, and common database conventions, the following c
 | care_fg | expiration_dt | VARCHAR | DATE | Similar to adjustment_dt, uses DATE_PARSE(CAST(expiration_dt AS VARCHAR), '%Y%m%d'), indicating string storage that should be DATE type. | Validate all expiration_dt values follow YYYYMMDD format and can be converted to DATE |
 | mdf | region_uuid | VARCHAR(36) | UUID | Column name suggests UUID data type. If database supports native UUID type, it would be more storage efficient than VARCHAR(36). | Check if region_uuid values are valid UUID format and consider native UUID type if supported |
 | o | time_local | TIME | TIME | Currently derived from datetime_local with string concatenation and casting. More efficient to store/compute as native TIME type. | Validate TIME calculations and consider direct TIME column derivation |
-| Final Output | total_care_cost | FLOAT/DOUBLE | DECIMAL(15,2) | Represents monetary values. FLOAT/DOUBLE can cause precision issues with financial calculations. DECIMAL ensures exact precision. | Check for precision issues in financial calculations and validate decimal places |
+| o | REGEXP_LIKE patterns | TEXT/VARCHAR | Lookup Table | The o CTE contains 18+ REGEXP_LIKE operations for reason categorization (e.g., 'food temp\|cold\|quality_temp\|temperature'). Lookup tables would be more efficient than regex pattern matching. | Create lookup table mapping and measure performance difference vs REGEXP_LIKE |
+| o3 | adjustment_group logic | Multiple CASE | Simplified Logic | Complex nested CASE statements with 10+ conditions could be simplified with standardized reason codes or lookup tables. | Analyze CASE statement complexity and frequency of condition matches |
+| Final | Aggregation patterns | Various | Optimized GROUP BY | Final SELECT uses COUNT, SUM, and conditional aggregations that could benefit from pre-aggregation or materialized views for frequently accessed data. | Measure aggregation performance and identify pre-computation opportunities |
 
 ## Section 2: Filter Application (Correctness & Efficiency)
 
@@ -69,9 +71,11 @@ Several filters could potentially be applied earlier in the query for improved p
 
 2. **Explicit Type Casting in JOINs**: Multiple JOINs require explicit casting, indicating potential schema inconsistencies that could be addressed for better performance.
 
-3. **REGEXP_LIKE Operations**: The extensive use of REGEXP_LIKE for reason categorization in the o CTE could potentially be optimized with lookup tables or simpler string operations.
+3. **REGEXP_LIKE Operations**: The extensive use of REGEXP_LIKE for reason categorization in the o CTE could potentially be optimized with lookup tables or simpler string operations. The query contains 18+ REGEXP_LIKE operations for categorizing adjustment_reason_name and fg_reason.
 
 4. **COALESCE Operations**: Multiple COALESCE operations for date calculations could be simplified if source data quality were improved.
+
+5. **Complex CASE Statements**: The query contains multiple nested CASE statements with up to 10+ conditions each for reason categorization, which could benefit from lookup table approaches.
 
 ## Validation Requirements
 
@@ -83,3 +87,6 @@ The Python validation script should test the following hypotheses:
 4. Analyze precision requirements for financial columns
 5. Assess the impact of filter pushdown by estimating row counts at different stages
 6. Validate that type casting operations don't introduce data loss
+7. Analyze REGEXP_LIKE pattern complexity and suggest lookup table alternatives
+8. Evaluate CASE statement logic complexity and optimization opportunities
+9. Measure potential performance gains from aggregation optimizations
