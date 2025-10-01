@@ -2,22 +2,25 @@
 
 This document provides a detailed, column-level logical analysis of each Common Table Expression (CTE) in the fulfillment_care_cost.sql query. The analysis is based solely on the SQL query and the context provided in "Breaking Down Logistic Care Costs Query.md".
 
+## Analysis Overview
+The query processes order fulfillment care costs through 11 CTEs that progressively build upon each other. The main data flow is: source data extraction → reason standardization → data integration → cost calculation → final aggregation. Key business logic includes extensive regex-based reason categorization and hierarchical cost attribution.
+
 ## CTE: adj
 Purpose: Identifies orders with Grubhub-paid refunds and retrieves the latest adjustment reason and associated contact reason for each order.
 
 | Column Name | Source | Derivation Logic | Notes / Questions |
 |-------------|--------|------------------|-------------------|
 | order_uuid | source_cass_rainbow_data.adjustment_reporting.order_uuid | Direct selection from the source table | None |
-| adjustment_reason_name | source_cass_rainbow_data.adjustment_reporting.reason | Uses MAX_BY function to get the reason corresponding to the latest adjustment_timestamp_utc for each order | Question: The context mentions this is the "formally recorded cause" but doesn't specify what format or standardization this field follows. Can the business logic for reason categorization be clarified? |
-| adj_contact_reason | source_zendesk_ref.secondary_contact_reason.name, source_zendesk_ref.primary_contact_reason.name | Uses MAX_BY with COALESCE to get the contact reason (secondary preferred over primary) corresponding to the latest adjustment_timestamp_utc | Question: Why is secondary contact reason preferred over primary contact reason? What is the business logic behind this prioritization? |
+| adjustment_reason_name | source_cass_rainbow_data.adjustment_reporting.reason | Uses MAX_BY function to get the reason corresponding to the latest adjustment_timestamp_utc for each order | Question: The context mentions this is the "formally recorded cause" but doesn't specify the complete set of possible values or their standardization rules. What is the authoritative list of adjustment reason values? |
+| adj_contact_reason | source_zendesk_ref.secondary_contact_reason.name, source_zendesk_ref.primary_contact_reason.name | Uses MAX_BY with COALESCE(sr.name, pr.name) to get the contact reason corresponding to the latest adjustment_timestamp_utc, prioritizing secondary over primary | Question: What is the business rationale for prioritizing secondary contact reason over primary contact reason? Is this hierarchy documented in business requirements? |
 
-## CTE: ghg
+## CTE: ghg  
 Purpose: Identifies orders with granted Grubhub Guarantee claims and categorizes them into standardized reason types.
 
 | Column Name | Source | Derivation Logic | Notes / Questions |
 |-------------|--------|------------------|-------------------|
-| order_uuid | ods.carecontactfacade_guarantee_claim.cart_uuid | Direct selection from source, with alias cart_uuid mapped to order_uuid | None |
-| fg_reason | ods.carecontactfacade_guarantee_claim.claim_type | CASE statement that maps 'SERVICE' to 'Late Delivery - GHG' and 'PRICING' to 'Price - GHG', using MAX aggregation | Question: Are there other claim_type values that should be handled? What happens to claims with different claim_type values? |
+| order_uuid | ods.carecontactfacade_guarantee_claim.cart_uuid | Direct selection from source, with alias cart_uuid mapped to order_uuid | Question: Is the cart_uuid to order_uuid mapping always 1:1? Are there any scenarios where this relationship might differ? |
+| fg_reason | ods.carecontactfacade_guarantee_claim.claim_type | CASE statement with MAX aggregation that maps 'SERVICE' → 'Late Delivery - GHG' and 'PRICING' → 'Price - GHG' | Question: What happens to guarantee claims with claim_type values other than 'SERVICE' or 'PRICING'? Are there other claim types in the data that should be handled? |
 
 ## CTE: care_fg
 Purpose: Identifies orders that had concessions and retrieves the latest contact reason associated with those concessions.
@@ -33,9 +36,9 @@ Purpose: Identifies orders with diner self-service cancellations and maps reason
 | Column Name | Source | Derivation Logic | Notes / Questions |
 |-------------|--------|------------------|-------------------|
 | order_uuid | ods.carereporting_cancellation_result.order_id | Direct selection with alias order_id mapped to order_uuid | None |
-| reason_code | ods.carereporting_cancellation_result.reason_code | Uses MAX aggregation to select a representative reason_code per order | Question: Why use MAX instead of the latest by timestamp? Could there be multiple reason codes per order and what's the business logic for selecting one? |
-| diner_ss_cancel_reason | ods.carereporting_cancellation_result.reason_code | CASE statement mapping specific reason codes to descriptive text (e.g., 'DINER_PAYMENT_ISSUE' to 'Payment Issues') | Question: Are these all the possible reason_code values? What happens to unmapped reason codes? |
-| diner_ss_cancel_reason_group | ods.carereporting_cancellation_result.reason_code | CASE statement mapping reason codes to broader groups ('Diner Issues' or 'Logistics Issues') | Question: The mapping shows most issues as 'Diner Issues' except late orders. Is this categorization aligned with the overall fulfillment cost attribution logic? |
+| reason_code | ods.carereporting_cancellation_result.reason_code | Uses MAX aggregation to select a representative reason_code per order | Question: Why use MAX aggregation instead of latest by timestamp or most frequent reason? If multiple reason codes exist per order, what is the business justification for this selection method? |
+| diner_ss_cancel_reason | ods.carereporting_cancellation_result.reason_code | CASE statement mapping: 'DINER_PAYMENT_ISSUE' → 'Payment Issues', 'DINER_CHOSE_WRONG_ADDRESS' → 'Delivery Information Incorrect', 'DINER_CHOSE_WRONG_ORDER_ITEMS' → 'Ordered By Mistake', 'DINER_DOES_NOT_WANT_LATE_ORDER' → 'Late Order', 'DINER_DOES_NOT_WANT_THE_FOOD' → 'Change of Plans' | Question: Is this the complete set of possible reason_code values in the source data? What happens to unmapped reason codes - are they set to NULL or excluded? |
+| diner_ss_cancel_reason_group | ods.carereporting_cancellation_result.reason_code | CASE statement mapping reason codes to two groups: 'Diner Issues' (payment, wrong address, wrong items, change of plans) and 'Logistics Issues' (late order only) | Question: The mapping classifies most cancellations as 'Diner Issues' except lateness. How does this align with the overall fulfillment cost attribution framework used elsewhere in the query? |
 
 ## CTE: cancels
 Purpose: Identifies cancelled orders and consolidates cancellation information from multiple sources including self-service cancellations.
@@ -122,12 +125,12 @@ Purpose: Integrates operational and financial data, standardizes issue reasons, 
 | cancel_contact_reason | cancels.cancel_contact_reason | Direct selection from cancels CTE | None |
 | ghd_late_ind | mdf.ghd_late_ind | Uses COALESCE to default to 0 if null | None |
 | ghd_late_ind_incl_cancel_time | mdf.ghd_late_ind, cancels.cancel_time_utc, mdf.ghd_eta_utc, mdf.dropoff_complete_time_utc | Complex CASE statement that includes cancellations after ETA as late deliveries when no completion time exists | Question: This seems like an important business rule. Can the logic for including cancelled orders in lateness metrics be documented more clearly? |
-| adjustment_reason_name | adj.adjustment_reason_name, adj.adj_contact_reason, cancels.cancel_contact_reason | Extensive CASE statement with REGEXP_LIKE patterns to standardize various reason texts into consistent categories | Question: This standardization logic is quite complex with many hardcoded patterns. Is there a comprehensive mapping document for all these regex patterns? How are new reason types handled? |
+| adjustment_reason_name | adj.adjustment_reason_name, adj.adj_contact_reason, cancels.cancel_contact_reason | Extensive CASE statement with REGEXP_LIKE patterns that standardizes various reason texts into consistent categories: 'food temperature', 'incorrect order', 'food damaged', 'missing item', 'item removed from order', 'late order', 'order or menu issue', 'out of item', 'missed delivery', plus special handling for generic 'refund due to' patterns | Question: This standardization logic contains numerous hardcoded regex patterns (e.g., 'food temp\|cold\|quality_temp\|temperature'). Is there a centralized reference document for all these patterns? How are new reason types or pattern variations handled when they appear in production data? |
 | adj_contact_reason | adj.adj_contact_reason | Direct selection from adj CTE | None |
 | driver_pay_per_order | integrated_order.order_contribution_profit_fact.driver_pay_per_order | Direct selection from the source table | None |
 | tip | integrated_order.order_contribution_profit_fact.tip | Direct selection from the source table | None |
 | bundle_ind | mdf.bundle_ind | Direct selection from mdf CTE | None |
-| fg_reason | ghg.fg_reason, care_fg.fg_reason, integrated_order.order_contribution_profit_fact.cp_care_concession_awarded_amount | Complex CASE statement with similar REGEXP_LIKE patterns as adjustment_reason_name, but only when concession amount > 0 | Question: The same regex patterns are used here as in adjustment_reason_name. Is there a shared function or reference for these patterns? |
+| fg_reason | ghg.fg_reason, care_fg.fg_reason, integrated_order.order_contribution_profit_fact.cp_care_concession_awarded_amount | Complex CASE statement that only processes when cp_care_concession_awarded_amount ≠ 0, then applies identical REGEXP_LIKE patterns as adjustment_reason_name to standardize fg_reason values | Question: The regex standardization patterns are duplicated from the adjustment_reason_name logic. Should these be consolidated into a shared function or reference table to maintain consistency and reduce maintenance overhead? |
 | care_cost_reason | csv_sandbox.care_cost_reasons.care_cost_reason | Direct selection joined on latest_contact_reason | Question: The context mentions this excludes certain contact reasons. What are the specific exclusion criteria? |
 | care_cost_group | csv_sandbox.care_cost_reasons.care_cost_group | Uses COALESCE to default to 'not grouped' if null | None |
 | cp_care_concession_awarded_amount | integrated_order.order_contribution_profit_fact.cp_care_concession_awarded_amount | Direct selection from the source table | None |
@@ -140,7 +143,7 @@ Purpose: Creates a consolidated reason field by prioritizing cancellation reason
 
 | Column Name | Source | Derivation Logic | Notes / Questions |
 |-------------|--------|------------------|-------------------|
-| adjustment_and_cancel_reason_combined | o.cancel_reason_name, o.adjustment_reason_name | CASE statement that uses cancel_reason_name when it's not 'Not Mapped' and not null, otherwise uses adjustment_reason_name | Question: Why is 'Not Mapped' treated the same as null? Is this a known data quality issue or intentional business logic? |
+| adjustment_and_cancel_reason_combined | o.cancel_reason_name, o.adjustment_reason_name | CASE statement with specific logic: when cancel_reason_name = 'Not Mapped' then adjustment_reason_name; when cancel_reason_name IS NULL then adjustment_reason_name; else LOWER(cancel_reason_name) | Question: Why is the 'Not Mapped' literal value treated equivalently to NULL? Is 'Not Mapped' a standard placeholder value in the cancellation reason data, and what are the data quality implications of this fallback logic? |
 
 *Note: Most other columns from the o CTE are passed through directly without modification*
 
@@ -151,9 +154,9 @@ Purpose: Calculates total care cost and derives final analytical reason groups f
 |-------------|--------|------------------|-------------------|
 | total_care_cost | o2 (multiple cost fields) | Sum of cp_care_concession_awarded_amount + cp_care_ticket_cost + cp_diner_adj + IF(cp_redelivery_cost IS NULL, 0, cp_redelivery_cost) + IF(cp_grub_care_refund IS NULL, 0.00, cp_grub_care_refund) | This is the primary metric calculated by the query |
 | cp_redelivery_cost | o2.cp_redelivery_cost | IF statement converting null to 0 | Ensures null values don't break the total_care_cost calculation |
-| adjustment_group | o2.cancel_group, integrated_ref.cancellation_reason_map.cancel_group, o2.adjustment_and_cancel_reason_combined | Complex CASE statement using cancellation mapping and REGEXP_LIKE patterns to categorize into 'Logistics Issues', 'Restaurant Issues', 'Diner Issues', or fallback groups | Question: This uses similar regex patterns as the o CTE. Should these be consolidated into a shared reference? |
-| fg_group | o2.cancel_group, integrated_ref.cancellation_reason_map.cancel_group, o2.fg_reason | Similar logic as adjustment_group but applied to fg_reason | Same concern about regex pattern duplication |
-| fg_reason | o2.cp_care_concession_awarded_amount, o2.fg_reason, o2.adjustment_and_cancel_reason_combined | CASE statement that uses adjustment_and_cancel_reason_combined when concession amount < 0 and fg_reason is null | Question: Why specifically when concession amount is negative? What does a negative concession represent? |
+| adjustment_group | o2.cancel_group, integrated_ref.cancellation_reason_map.cancel_group, o2.adjustment_and_cancel_reason_combined | CASE statement: when o2.cancel_group IS NOT NULL AND ≠ 'Other' then crm.cancel_group; else applies REGEXP_LIKE patterns to categorize into 'Logistics Issues' (missed delivery, late, damaged, food temp), 'Restaurant Issues' (missing items, incorrect orders, quality issues), 'Diner Issues' (diner error, change of plans), with fallback to COALESCE(crm.cancel_group, 'not grouped') | Question: This pattern matching logic is replicated from the o CTE with slight variations. Should there be a standardized function or lookup table for these categorization rules? Also, when does cancel_group equal 'Other' and how should those cases be handled? |
+| fg_group | o2.cancel_group, integrated_ref.cancellation_reason_map.cancel_group, o2.fg_reason | Identical CASE logic as adjustment_group but applied to fg_reason instead of adjustment_and_cancel_reason_combined | Question: The exact same categorization logic is duplicated here. This suggests these rules are business-critical - should they be centralized to ensure consistency across all reason categorizations? |
+| fg_reason | o2.cp_care_concession_awarded_amount, o2.fg_reason, o2.adjustment_and_cancel_reason_combined | CASE statement: when cp_care_concession_awarded_amount < 0 AND fg_reason IS NULL then adjustment_and_cancel_reason_combined; else fg_reason | Question: What business scenario does a negative concession amount represent? Is this a refund that should be linked to the primary order issue reason, and why only when fg_reason is specifically NULL? |
 
 *Note: Most other columns from the o2 CTE are passed through directly*
 
@@ -164,7 +167,7 @@ Purpose: Aggregates order-level data into summarized metrics grouped by key anal
 |-------------|--------|------------------|-------------------|
 | cany_ind | o3.CA_Market, o3.NYC_Market | CASE statement that prioritizes CA_Market='CA', then NYC_Market='DCWP', otherwise 'ROM' | [Interpretation] Creates market segments: California, DC/Washington/Philadelphia, Rest of Markets |
 | care_cost_reason_group | o3.total_care_cost, o3.adjustment_group, o3.fg_group, o3.care_cost_group | Hierarchical CASE statement starting with zero cost check, then adjustment_group, fg_group, and finally care_cost_group | Question: This hierarchy seems important for business attribution. Is this priority order documented in business requirements? |
-| eta_care_reasons | o3.adjustment_and_cancel_reason_combined, o3.fg_reason, o3.care_cost_reason | CASE statement with IN clause checking for specific ETA-related reason text values | Question: The hardcoded list includes some duplicate values. Is this intentional or could it be simplified? |
+| eta_care_reasons | o3.adjustment_and_cancel_reason_combined, o3.fg_reason, o3.care_cost_reason | CASE statement using IN clause to check for specific ETA-related values: 'order eta update', 'delivery estimate confirmation', 'diner requested cancel - order too late', 'late delivery', 'late order' (with some duplicate entries in the list) | Question: The hardcoded list contains duplicate values ('delivery estimate confirmation' appears 3 times). Is this intentional for emphasis or should it be cleaned up? Also, what is the business definition that distinguishes ETA issues from other logistics issues? |
 | orders | o3.order_uuid | COUNT of all order records | Standard row count |
 | distinct_order_uuid | o3.order_uuid | COUNT(DISTINCT order_uuid) | Check for potential duplication in the dataset |
 | total_care_cost | o3.total_care_cost | SUM of total_care_cost | Primary aggregated metric |
