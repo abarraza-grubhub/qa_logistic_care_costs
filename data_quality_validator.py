@@ -45,16 +45,19 @@ class DataQualityValidator:
         exact_date_columns = ['date1', 'date2']
         
         # Date columns that can extend beyond range (+/- 1 day logic)
-        extended_date_columns = []
+        # These are columns from CTEs that use DATE_ADD('day', -1, ...) logic
+        extended_date_columns = ['deliverytime_utc']
         
         for col in exact_date_columns:
             if col in df.columns:
-                df[col] = pd.to_datetime(df[col])
+                # Create a copy to avoid modifying original data
+                df_copy = df.copy()
+                df_copy[col] = pd.to_datetime(df_copy[col])
                 
                 # Check for dates outside the specified range
-                out_of_range = df[
-                    (df[col] < self.start_date) | 
-                    (df[col] > self.end_date)
+                out_of_range = df_copy[
+                    (df_copy[col] < self.start_date) | 
+                    (df_copy[col] > self.end_date)
                 ]
                 
                 if not out_of_range.empty:
@@ -64,7 +67,34 @@ class DataQualityValidator:
                         'description': f'{len(out_of_range)} records with {col} outside specified date range',
                         'min_date': out_of_range[col].min(),
                         'max_date': out_of_range[col].max(),
-                        'expected_range': f'{self.start_date.date()} to {self.end_date.date()}'
+                        'expected_range': f'{self.start_date.date()} to {self.end_date.date()}',
+                        'severity': 'high'
+                    })
+        
+        # Check extended date columns with +/- 1 day tolerance
+        for col in extended_date_columns:
+            if col in df.columns:
+                df_copy = df.copy()
+                df_copy[col] = pd.to_datetime(df_copy[col])
+                
+                # Allow +/- 1 day range for these columns
+                extended_start = self.start_date - timedelta(days=1)
+                extended_end = self.end_date + timedelta(days=1)
+                
+                out_of_range = df_copy[
+                    (df_copy[col] < extended_start) | 
+                    (df_copy[col] > extended_end)
+                ]
+                
+                if not out_of_range.empty:
+                    issues.append({
+                        'type': 'extended_date_range_violation',
+                        'column': col,
+                        'description': f'{len(out_of_range)} records with {col} outside extended date range (+/- 1 day)',
+                        'min_date': out_of_range[col].min(),
+                        'max_date': out_of_range[col].max(),
+                        'expected_range': f'{extended_start.date()} to {extended_end.date()}',
+                        'severity': 'medium'
                     })
         
         return issues
@@ -133,22 +163,34 @@ class DataQualityValidator:
                 # Check for extreme values that might indicate data issues
                 col_data = pd.to_numeric(df[col], errors='coerce')
                 
-                # Check for unreasonably large positive values
-                large_values = col_data[col_data > 10000]  # Over $10,000
+                # Check for unreasonably large positive values (contextual based on column)
+                if col in ['driver_pay_per_order', 'tip']:
+                    # Driver pay and tips should be reasonable per-order amounts
+                    large_threshold = 500  # $500 per order seems high for tips/driver pay
+                elif col in ['total_care_cost', 'cp_care_concession_awarded_amount']:
+                    # Care costs can be higher but still should be reasonable
+                    large_threshold = 1000  # $1000 per order for care costs
+                else:
+                    # General threshold for other monetary columns
+                    large_threshold = 10000
+                
+                large_values = col_data[col_data > large_threshold]
                 if not large_values.empty:
                     issues.append({
                         'type': 'extreme_monetary_value',
                         'column': col,
                         'description': f'{len(large_values)} records with extremely large values (>${large_values.min():.2f} to ${large_values.max():.2f})',
                         'max_value': large_values.max(),
-                        'sample_records': large_values.head().tolist()
+                        'threshold': large_threshold,
+                        'sample_records': large_values.head().tolist(),
+                        'severity': 'medium'
                     })
                 
                 # Check for negative values where they might not be expected
                 negative_values = col_data[col_data < 0]
                 
                 # For some columns, negative values are expected (refunds, adjustments)
-                expected_negative_columns = ['cp_diner_adj', 'total_care_cost']
+                expected_negative_columns = ['cp_diner_adj', 'total_care_cost', 'cp_care_concession_awarded_amount']
                 
                 if not negative_values.empty and col not in expected_negative_columns:
                     issues.append({
@@ -156,17 +198,19 @@ class DataQualityValidator:
                         'column': col,
                         'description': f'{len(negative_values)} records with negative values in {col}',
                         'min_value': negative_values.min(),
-                        'sample_records': negative_values.head().tolist()
+                        'sample_records': negative_values.head().tolist(),
+                        'severity': 'high'
                     })
                 
-                # Check for NaN values where they shouldn't exist
+                # Check for NaN values where they shouldn't exist in aggregated data
                 nan_count = col_data.isna().sum()
                 if nan_count > 0:
                     issues.append({
                         'type': 'missing_monetary_values',
                         'column': col,
                         'description': f'{nan_count} records with missing values in {col}',
-                        'percentage': (nan_count / len(df)) * 100
+                        'percentage': (nan_count / len(df)) * 100,
+                        'severity': 'low' if (nan_count / len(df)) < 0.1 else 'medium'
                     })
         
         return issues
@@ -290,6 +334,73 @@ class DataQualityValidator:
         
         return issues
     
+    def validate_sql_query_specific_logic(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """
+        Validate logic specific to the fulfillment care cost SQL query structure.
+        Based on analysis of fulfillment_care_cost.sql and the context document.
+        """
+        issues = []
+        
+        # Validate market segmentation logic (CA vs NYC vs ROM)
+        if 'cany_ind' in df.columns:
+            # According to the query, cany_ind should be derived from CA_Market and NYC_Market
+            market_counts = df['cany_ind'].value_counts()
+            
+            # Check for reasonable distribution
+            total_records = len(df)
+            if 'ROM' in market_counts:
+                rom_percentage = (market_counts['ROM'] / total_records) * 100
+                if rom_percentage > 80:  # ROM should not dominate unless expected
+                    issues.append({
+                        'type': 'market_distribution_warning',
+                        'description': f'ROM market represents {rom_percentage:.1f}% of records',
+                        'details': 'High ROM percentage may indicate unexpected market classification',
+                        'severity': 'low'
+                    })
+        
+        # Validate ETA care reasons logic
+        if 'eta_care_reasons' in df.columns and 'care_cost_reason_group' in df.columns:
+            # Check correlation between ETA issues and logistics issues
+            eta_issues = df[df['eta_care_reasons'] == 'ETA Issues']
+            if not eta_issues.empty:
+                logistics_in_eta = eta_issues[eta_issues['care_cost_reason_group'].str.contains('logistics', case=False, na=False)]
+                if len(logistics_in_eta) / len(eta_issues) < 0.5:  # Less than 50% correlation
+                    issues.append({
+                        'type': 'eta_logistics_correlation_warning',
+                        'description': f'Only {len(logistics_in_eta)} of {len(eta_issues)} ETA Issues are classified as logistics issues',
+                        'details': 'Expected higher correlation between ETA issues and logistics problems',
+                        'severity': 'low'
+                    })
+        
+        # Validate cancellation logic consistency
+        if 'cancels_osmf_definition' in df.columns and 'orders' in df.columns:
+            # Cancellations should not exceed total orders
+            invalid_cancels = df[df['cancels_osmf_definition'] > df['orders']]
+            if not invalid_cancels.empty:
+                issues.append({
+                    'type': 'logical_inconsistency',
+                    'description': f'{len(invalid_cancels)} records where cancellations > total orders',
+                    'details': 'Cancellations cannot exceed total orders',
+                    'severity': 'high'
+                })
+            
+            # Check for unusually high cancellation rates
+            if not df.empty:
+                high_cancel_rate = df[
+                    (df['orders'] > 0) & 
+                    (df['cancels_osmf_definition'] / df['orders'] > 0.5)
+                ]
+                if not high_cancel_rate.empty:
+                    issues.append({
+                        'type': 'high_cancellation_rate_warning',
+                        'description': f'{len(high_cancel_rate)} records with >50% cancellation rate',
+                        'details': 'High cancellation rates may indicate data quality issues',
+                        'max_rate': (high_cancel_rate['cancels_osmf_definition'] / high_cancel_rate['orders']).max(),
+                        'severity': 'medium'
+                    })
+        
+        return issues
+    
     def run_validation(self, df: pd.DataFrame) -> Dict[str, Any]:
         """
         Run all validation checks on the dataframe.
@@ -314,7 +425,8 @@ class DataQualityValidator:
             ('Monetary Values Validation', self.validate_monetary_values),
             ('Categorical Consistency Validation', self.validate_categorical_consistency),
             ('Aggregation Logic Validation', self.validate_aggregation_logic),
-            ('Business Logic Validation', self.validate_business_logic)
+            ('Business Logic Validation', self.validate_business_logic),
+            ('SQL Query Specific Logic Validation', self.validate_sql_query_specific_logic)
         ]
         
         for check_name, method in validation_methods:
@@ -347,12 +459,16 @@ class DataQualityValidator:
             issue_type = issue.get('type', 'unknown')
             summary['issues_by_type'][issue_type] = summary['issues_by_type'].get(issue_type, 0) + 1
             
-            # Flag critical issues
+            # Flag critical issues based on type and severity
             critical_types = [
                 'date_range_violation', 'logical_inconsistency', 
                 'business_logic_violation', 'order_count_mismatch'
             ]
-            if issue_type in critical_types:
+            
+            # Also consider high severity issues as critical
+            is_critical = (issue_type in critical_types) or (issue.get('severity') == 'high')
+            
+            if is_critical:
                 summary['critical_issues'].append(issue)
         
         return summary
