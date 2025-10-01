@@ -9,6 +9,14 @@ This script helps identify logical gaps in the query output by validating:
 - Data consistency across different dimensions
 
 Based on analysis of fulfillment_care_cost.sql and Breaking Down Logistic Care Costs Query.md
+
+Performance Notes:
+- Uses vectorized pandas operations for efficiency
+- Minimal data copying to preserve memory
+- Configurable validation levels for large datasets
+
+Author: Generated for Prompt 4 validation task
+Version: 2.0 (Enhanced with severity levels and SQL-specific validations)
 """
 
 import pandas as pd
@@ -19,19 +27,40 @@ import warnings
 
 
 class DataQualityValidator:
-    """Validates data quality for fulfillment care cost query results."""
+    """
+    Validates data quality for fulfillment care cost query results.
     
-    def __init__(self, start_date: str, end_date: str):
+    This validator is specifically designed for the output of the fulfillment_care_cost.sql
+    query and implements validation logic based on the query structure and business rules
+    documented in "Breaking Down Logistic Care Costs Query.md".
+    """
+    
+    def __init__(self, start_date: str, end_date: str, validation_level: str = 'full'):
         """
         Initialize validator with date parameters.
         
         Args:
             start_date: Query start date in YYYY-MM-DD format
-            end_date: Query end date in YYYY-MM-DD format
+            end_date: Query end date in YYYY-MM-DD format  
+            validation_level: Level of validation ('full', 'basic', 'critical_only')
+                - 'full': Run all validation checks
+                - 'basic': Run essential checks only (date, monetary, aggregation)
+                - 'critical_only': Run only critical business logic checks
         """
         self.start_date = pd.to_datetime(start_date)
         self.end_date = pd.to_datetime(end_date)
+        self.validation_level = validation_level
         self.validation_results = []
+        
+        # Define validation levels
+        self.validation_configs = {
+            'critical_only': ['Date Range Validation', 'Aggregation Logic Validation', 'Business Logic Validation'],
+            'basic': ['Date Range Validation', 'Monetary Values Validation', 'Aggregation Logic Validation', 
+                     'Business Logic Validation'],
+            'full': ['Date Range Validation', 'Timestamp Logic Validation', 'Monetary Values Validation',
+                    'Categorical Consistency Validation', 'Aggregation Logic Validation', 
+                    'Business Logic Validation', 'SQL Query Specific Logic Validation']
+        }
         
     def validate_date_ranges(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
         """
@@ -413,13 +442,14 @@ class DataQualityValidator:
         """
         print(f"Starting data quality validation for {len(df)} records...")
         print(f"Date range: {self.start_date.date()} to {self.end_date.date()}")
+        print(f"Validation level: {self.validation_level}")
         print(f"Columns available: {list(df.columns)}")
         print("-" * 50)
         
         all_issues = []
         
-        # Run all validation checks
-        validation_methods = [
+        # Get validation methods based on validation level
+        all_validation_methods = [
             ('Date Range Validation', self.validate_date_ranges),
             ('Timestamp Logic Validation', self.validate_timestamp_logic),
             ('Monetary Values Validation', self.validate_monetary_values),
@@ -428,6 +458,12 @@ class DataQualityValidator:
             ('Business Logic Validation', self.validate_business_logic),
             ('SQL Query Specific Logic Validation', self.validate_sql_query_specific_logic)
         ]
+        
+        # Filter methods based on validation level
+        selected_methods = self.validation_configs.get(self.validation_level, 
+                                                      self.validation_configs['full'])
+        validation_methods = [(name, method) for name, method in all_validation_methods 
+                             if name in selected_methods]
         
         for check_name, method in validation_methods:
             print(f"Running {check_name}...")
@@ -511,6 +547,84 @@ class DataQualityValidator:
                     print(f"   {key}: {value}")
         
         print("\n" + "=" * 60)
+    
+    def export_validation_results(self, validation_results: Dict[str, Any], 
+                                 output_file: str = None) -> Optional[str]:
+        """
+        Export validation results to a CSV file for further analysis.
+        
+        Args:
+            validation_results: Results from run_validation()
+            output_file: Optional output file path. If None, generates timestamped filename.
+            
+        Returns:
+            Path to the exported file
+        """
+        if output_file is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_file = f"data_quality_validation_results_{timestamp}.csv"
+        
+        # Convert issues to DataFrame
+        issues_data = []
+        for issue in validation_results['all_issues']:
+            row = {
+                'issue_type': issue.get('type', 'unknown'),
+                'severity': issue.get('severity', 'unknown'),
+                'description': issue.get('description', ''),
+                'column': issue.get('column', ''),
+                'details': issue.get('details', ''),
+                'count': issue.get('count', 1)
+            }
+            issues_data.append(row)
+        
+        if issues_data:
+            issues_df = pd.DataFrame(issues_data)
+            issues_df.to_csv(output_file, index=False)
+            print(f"Validation results exported to: {output_file}")
+            return output_file
+        else:
+            print("No issues found - no file exported")
+            return None
+    
+    def get_validation_summary(self, validation_results: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Get a concise summary of validation results for reporting.
+        
+        Args:
+            validation_results: Results from run_validation()
+            
+        Returns:
+            Dictionary with summary metrics
+        """
+        summary = {
+            'total_records': validation_results['total_records'],
+            'total_issues': validation_results['total_issues'],
+            'critical_issues': len(validation_results['critical_issues']),
+            'date_range': validation_results['date_range'],
+            'validation_level': self.validation_level,
+            'issues_by_severity': {},
+            'data_quality_score': 0
+        }
+        
+        # Count issues by severity
+        for issue in validation_results['all_issues']:
+            severity = issue.get('severity', 'unknown')
+            summary['issues_by_severity'][severity] = summary['issues_by_severity'].get(severity, 0) + 1
+        
+        # Calculate data quality score (0-100)
+        if validation_results['total_records'] > 0:
+            # Weighted scoring: critical issues heavily penalize score
+            penalty = (summary['critical_issues'] * 10 + 
+                      summary['issues_by_severity'].get('high', 0) * 5 +
+                      summary['issues_by_severity'].get('medium', 0) * 2 +
+                      summary['issues_by_severity'].get('low', 0) * 1)
+            
+            # Normalize penalty relative to dataset size
+            max_penalty = validation_results['total_records'] * 0.1  # 10% of records as max penalty
+            normalized_penalty = min(penalty, max_penalty) / max_penalty if max_penalty > 0 else 0
+            summary['data_quality_score'] = max(0, round((1 - normalized_penalty) * 100, 1))
+        
+        return summary
 
 
 def generate_sample_data() -> pd.DataFrame:
@@ -568,15 +682,15 @@ def generate_sample_data() -> pd.DataFrame:
 
 def main():
     """Main function to demonstrate the data quality validator."""
-    print("Fulfillment Care Cost Data Quality Validator")
-    print("=" * 50)
+    print("Fulfillment Care Cost Data Quality Validator v2.0")
+    print("=" * 55)
     
     # Example usage with sample data
     print("Generating sample data for demonstration...")
     sample_df = generate_sample_data()
     
-    # Initialize validator with date range
-    validator = DataQualityValidator('2024-09-21', '2024-10-23')
+    # Initialize validator with date range and validation level
+    validator = DataQualityValidator('2024-09-21', '2024-10-23', validation_level='full')
     
     # Run validation
     results = validator.run_validation(sample_df)
@@ -584,17 +698,38 @@ def main():
     # Print report
     validator.print_validation_report(results)
     
+    # Demonstrate new features
+    print("\n" + "=" * 55)
+    print("ENHANCED FEATURES DEMONSTRATION")
+    print("=" * 55)
+    
+    # Get validation summary
+    summary = validator.get_validation_summary(results)
+    print(f"\nData Quality Score: {summary['data_quality_score']}/100")
+    print(f"Issues by severity: {summary['issues_by_severity']}")
+    
+    # Export results (commented out to avoid file creation in demo)
+    # output_file = validator.export_validation_results(results)
+    
+    # Show different validation levels
+    print(f"\nValidation Levels Available:")
+    for level, methods in validator.validation_configs.items():
+        print(f"  {level}: {len(methods)} checks - {', '.join(methods)}")
+    
     print("\nUSAGE INSTRUCTIONS:")
-    print("1. Replace sample data with actual query results:")
-    print("   df = pd.read_csv('your_query_results.csv')")
-    print("   # or load from your data source")
-    print("")
-    print("2. Initialize validator with your date parameters:")
+    print("1. Basic usage:")
     print("   validator = DataQualityValidator('2024-09-21', '2024-10-23')")
-    print("")
-    print("3. Run validation:")
     print("   results = validator.run_validation(df)")
-    print("   validator.print_validation_report(results)")
+    print("")
+    print("2. Different validation levels:")
+    print("   validator = DataQualityValidator('2024-09-21', '2024-10-23', 'basic')")
+    print("")
+    print("3. Export results:")
+    print("   validator.export_validation_results(results, 'my_results.csv')")
+    print("")
+    print("4. Get summary metrics:")
+    print("   summary = validator.get_validation_summary(results)")
+    print("   print(f'Data Quality Score: {summary[\"data_quality_score\"]}')")
 
 
 if __name__ == "__main__":
