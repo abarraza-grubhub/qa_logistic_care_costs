@@ -429,6 +429,260 @@ def analyze_aggregation_performance():
         print("    - Final output not available for analysis")
 
 
+def analyze_date_calculation_complexity():
+    """Analyze date calculation complexity and COALESCE operations."""
+    
+    print("=== DATE CALCULATION COMPLEXITY ANALYSIS ===\n")
+    
+    if 'mdf' in cte_dfs:
+        mdf_df = cte_dfs['mdf']
+        
+        print("13. Date calculation complexity analysis:")
+        
+        # Identify date-related columns in mdf
+        date_columns = []
+        potential_date_cols = [
+            'dropoff_complete_time_local', 'eta_at_order_placement_time_local', 
+            'order_created_time_local', 'deliverytime_utc', 'datetime_local'
+        ]
+        
+        for col in potential_date_cols:
+            if col in mdf_df.columns:
+                date_columns.append(col)
+        
+        print(f"    - Date-related columns in mdf: {len(date_columns)}")
+        
+        # Analyze COALESCE complexity
+        coalesce_operations = [
+            'COALESCE(dropoff_complete_time_local, eta_at_order_placement_time_local, DATE_ADD(...))',
+            'COALESCE(dropoff_complete_time_utc, eta_at_order_placement_time_utc, DATE_ADD(...))',
+            'COALESCE(cancellation_time_utc, tf.created_time)',
+            'COALESCE(sr.name, pr.name) for contact reasons'
+        ]
+        
+        print(f"    - Major COALESCE operations: {len(coalesce_operations)}")
+        for i, op in enumerate(coalesce_operations, 1):
+            print(f"      {i}. {op}")
+        print()
+        
+        # Analyze date hierarchy usage
+        if date_columns:
+            print("    Date hierarchy analysis:")
+            for col in date_columns[:3]:  # Analyze first 3 date columns
+                if col in mdf_df.columns:
+                    null_count = mdf_df[col].isnull().sum()
+                    null_percentage = (null_count / len(mdf_df)) * 100 if len(mdf_df) > 0 else 0
+                    print(f"    - {col}: {null_percentage:.1f}% null values")
+            
+            print()
+            print("    Optimization recommendations:")
+            print("    - Establish clear date hierarchy with business rules")
+            print("    - Consider pre-computing fallback date logic")
+            print("    - Add indexes on primary date columns")
+            print("    - Validate date quality to reduce COALESCE complexity")
+        else:
+            print("    - Date columns not found for analysis")
+        print()
+
+
+def analyze_window_function_alternatives():
+    """Analyze window function vs MAX_BY performance characteristics."""
+    
+    print("=== WINDOW FUNCTION ANALYSIS ===\n")
+    
+    print("14. MAX_BY vs Window Function analysis:")
+    
+    # Identify MAX_BY usage patterns from the query
+    max_by_operations = [
+        'MAX_BY(reason, adjustment_timestamp_utc) in adj CTE',
+        'MAX_BY(COALESCE(sr.name, pr.name), adjustment_timestamp_utc) in adj CTE',
+        'MAX_BY(COALESCE(sr.name, pr.name), issue_timestamp_utc) in care_fg CTE',
+        'MAX_BY(ticket_id, created_time) in contacts CTE',
+        'MAX_BY(COALESCE(sr.name, pr.name), created_time) in contacts CTE'
+    ]
+    
+    print(f"    - MAX_BY operations identified: {len(max_by_operations)}")
+    for i, op in enumerate(max_by_operations, 1):
+        print(f"      {i}. {op}")
+    print()
+    
+    # Analyze potential window function alternatives
+    window_alternatives = [
+        {
+            'current': 'MAX_BY(reason, adjustment_timestamp_utc)',
+            'alternative': 'ROW_NUMBER() OVER (PARTITION BY order_uuid ORDER BY adjustment_timestamp_utc DESC)',
+            'benefit': 'Better optimizer understanding, explicit partitioning'
+        },
+        {
+            'current': 'MAX_BY(ticket_id, created_time)',
+            'alternative': 'FIRST_VALUE(ticket_id) OVER (PARTITION BY order_uuid ORDER BY created_time DESC)',
+            'benefit': 'Clearer intent, potential for better indexing strategy'
+        }
+    ]
+    
+    print("    Window function alternatives:")
+    for i, alt in enumerate(window_alternatives, 1):
+        print(f"      {i}. Current: {alt['current']}")
+        print(f"         Alternative: {alt['alternative']}")
+        print(f"         Benefit: {alt['benefit']}")
+        print()
+    
+    # Analyze partitioning implications
+    if any(cte in cte_dfs for cte in ['adj', 'care_fg', 'contacts']):
+        print("    Partitioning analysis for window functions:")
+        
+        for cte_name in ['adj', 'care_fg', 'contacts']:
+            if cte_name in cte_dfs:
+                df = cte_dfs[cte_name]
+                if 'order_uuid' in df.columns:
+                    unique_orders = df['order_uuid'].nunique()
+                    total_rows = len(df)
+                    avg_rows_per_partition = total_rows / unique_orders if unique_orders > 0 else 0
+                    
+                    print(f"    - {cte_name}: {total_rows:,} rows, {unique_orders:,} partitions")
+                    print(f"      Average rows per partition: {avg_rows_per_partition:.1f}")
+        print()
+    
+    print("    Recommendations:")
+    print("    - Test window function performance vs MAX_BY for large datasets")
+    print("    - Consider explicit partitioning for better query plan optimization")
+    print("    - Index partition columns (order_uuid) for window operations")
+    print("    - Use FIRST_VALUE/LAST_VALUE where appropriate for clarity")
+    print()
+
+
+def analyze_partitioning_strategy():
+    """Assess partitioning strategy effectiveness for large fact tables."""
+    
+    print("=== PARTITIONING STRATEGY ANALYSIS ===\n")
+    
+    print("15. Large table partitioning analysis:")
+    
+    # Analyze fact table characteristics
+    fact_tables = {
+        'order_contribution_profit_fact': ['order_date', 'delivery_time_ct'],
+        'managed_delivery_fact_v2': ['business_day'], 
+        'ticket_fact': ['ticket_created_date'],
+        'adjustment_reporting': ['adjustment_dt'],
+        'concession_reporting': ['expiration_dt']
+    }
+    
+    print("    Current partitioning patterns:")
+    for table, date_cols in fact_tables.items():
+        print(f"    - {table}: partitioned by {', '.join(date_cols)}")
+    print()
+    
+    # Analyze access patterns from the query
+    access_patterns = [
+        {
+            'table': 'order_contribution_profit_fact',
+            'filters': ['order_date BETWEEN (±1 day)', 'managed_delivery_ind = TRUE'],
+            'joins': ['order_uuid'],
+            'optimization': 'Consider composite partitioning by (order_date, managed_delivery_ind)'
+        },
+        {
+            'table': 'managed_delivery_fact_v2', 
+            'filters': ['business_day BETWEEN (±1 day)', 'derived date BETWEEN exact dates'],
+            'joins': ['order_uuid'],
+            'optimization': 'Consider sub-partitioning by region for geo-based queries'
+        },
+        {
+            'table': 'ticket_fact',
+            'filters': ['ticket_created_date BETWEEN (±1 day)', 'cpo_contact_indicator = 1'],
+            'joins': ['ticket_id', 'order_uuid'],
+            'optimization': 'Consider partitioning by (date, contact_indicator) for filter efficiency'
+        }
+    ]
+    
+    print("    Access pattern analysis:")
+    for i, pattern in enumerate(access_patterns, 1):
+        print(f"      {i}. {pattern['table']}:")
+        print(f"         Filters: {', '.join(pattern['filters'])}")
+        print(f"         Joins: {', '.join(pattern['joins'])}")
+        print(f"         Optimization: {pattern['optimization']}")
+        print()
+    
+    # Analyze date range efficiency
+    if 'o' in cte_dfs:
+        o_df = cte_dfs['o']
+        print("    Date range filter efficiency:")
+        
+        date_columns = ['date1', 'date2', 'deliverytime_utc']
+        for col in date_columns:
+            if col in o_df.columns and o_df[col].dtype.name.startswith('datetime'):
+                date_range = o_df[col].max() - o_df[col].min()
+                unique_dates = o_df[col].dt.date.nunique() if hasattr(o_df[col].dt, 'date') else 'N/A'
+                print(f"        - {col}: {date_range} range, {unique_dates} unique dates")
+        print()
+    
+    print("    Partitioning recommendations:")
+    print("    - Implement composite partitioning for frequently filtered dimensions")
+    print("    - Consider range partitioning for date columns with sub-partitioning")
+    print("    - Evaluate partition pruning effectiveness with EXPLAIN plans")
+    print("    - Monitor partition skew and adjust boundaries as needed")
+    print("    - Consider columnar storage for analytical workloads")
+    print()
+
+
+def validate_edge_cases():
+    """Validate edge cases and error handling scenarios."""
+    
+    print("=== EDGE CASE VALIDATION ===\n")
+    
+    print("16. Edge case and error handling analysis:")
+    
+    # Check for potential division by zero or null handling issues
+    edge_cases = [
+        'DATE_DIFF calculations with null timestamps',
+        'Division operations in ETA calculations',
+        'CAST operations on invalid data formats',
+        'JOIN operations with null keys',
+        'REGEXP_LIKE operations on null values',
+        'Aggregation functions with all-null groups'
+    ]
+    
+    print("    Potential edge cases identified:")
+    for i, case in enumerate(edge_cases, 1):
+        print(f"      {i}. {case}")
+    print()
+    
+    # Analyze null handling patterns
+    if 'o' in cte_dfs:
+        o_df = cte_dfs['o']
+        
+        print("    Null value analysis:")
+        critical_columns = ['order_uuid', 'total_care_cost', 'managed_delivery_ind']
+        
+        for col in critical_columns:
+            if col in o_df.columns:
+                null_count = o_df[col].isnull().sum()
+                null_percentage = (null_count / len(o_df)) * 100 if len(o_df) > 0 else 0
+                print(f"      - {col}: {null_percentage:.2f}% null values")
+        print()
+    
+    # Analyze data type consistency
+    print("    Data type consistency checks:")
+    
+    casting_operations = [
+        'CAST(adjustment_dt AS VARCHAR) - check for invalid formats',
+        'CAST(ticket_id AS BIGINT) - check for non-numeric values', 
+        'CAST(cancellation_ticket_id AS BIGINT) - check for overflow',
+        'DATE_PARSE operations - check for parsing failures'
+    ]
+    
+    for i, op in enumerate(casting_operations, 1):
+        print(f"      {i}. {op}")
+    print()
+    
+    print("    Recommendations:")
+    print("    - Add explicit null handling for critical calculations")
+    print("    - Implement data validation before type casting operations")
+    print("    - Add error handling for date parsing functions")
+    print("    - Monitor for data quality issues that could cause query failures")
+    print("    - Consider using TRY_CAST functions where available")
+    print()
+
+
 def generate_summary_recommendations():
     """Generate summary of all recommendations."""
     
@@ -466,13 +720,35 @@ def generate_summary_recommendations():
         "   - Index grouping columns for better performance",
         "   - Evaluate columnar storage for analytical workloads",
         "",
-        "7. VALIDATION PRIORITIES:",
-        "   - Verify data quality before implementing type changes",
-        "   - Test filter pushdown impact on query performance",
-        "   - Validate financial precision requirements with business stakeholders",
-        "   - Monitor JOIN performance after type standardization",
-        "   - Benchmark regex vs lookup table performance",
-        "   - Measure CASE statement optimization impact"
+        "7. DATE CALCULATION OPTIMIZATIONS:",
+        "   - Simplify complex COALESCE operations with business rule standardization",
+        "   - Pre-compute fallback date logic where possible",
+        "   - Add indexes on primary date columns for COALESCE operations",
+        "",
+        "8. WINDOW FUNCTION OPTIMIZATIONS:",
+        "   - Evaluate explicit window functions vs MAX_BY for large datasets",
+        "   - Use FIRST_VALUE/LAST_VALUE for clearer intent",
+        "   - Index partition columns for window operations",
+        "",
+        "9. PARTITIONING OPTIMIZATIONS:",
+        "   - Implement composite partitioning for frequently filtered dimensions",
+        "   - Consider sub-partitioning by region or managed_delivery_ind",
+        "   - Monitor partition pruning effectiveness",
+        "",
+        "10. EDGE CASE HANDLING:",
+        "    - Add explicit null handling for critical calculations",
+        "    - Implement data validation before type casting",
+        "    - Use TRY_CAST functions where available",
+        "",
+        "11. VALIDATION PRIORITIES:",
+        "    - Verify data quality before implementing type changes",
+        "    - Test filter pushdown impact on query performance",
+        "    - Validate financial precision requirements with business stakeholders",
+        "    - Monitor JOIN performance after type standardization",
+        "    - Benchmark regex vs lookup table performance",
+        "    - Measure CASE statement optimization impact",
+        "    - Test window function alternatives for performance",
+        "    - Validate partitioning strategy with execution plans"
     ]
     
     for rec in recommendations:
@@ -509,6 +785,10 @@ def run_validation():
     analyze_regexp_complexity()
     analyze_case_statement_complexity()
     analyze_aggregation_performance()
+    analyze_date_calculation_complexity()
+    analyze_window_function_alternatives()
+    analyze_partitioning_strategy()
+    validate_edge_cases()
     generate_summary_recommendations()
     
     print("Validation analysis complete.")

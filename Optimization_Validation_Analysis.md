@@ -27,7 +27,9 @@ Based on column names, context, and common database conventions, the following c
 | o | time_local | TIME | TIME | Currently derived from datetime_local with string concatenation and casting. More efficient to store/compute as native TIME type. | Validate TIME calculations and consider direct TIME column derivation |
 | o | REGEXP_LIKE patterns | TEXT/VARCHAR | Lookup Table | The o CTE contains 18+ REGEXP_LIKE operations for reason categorization (e.g., 'food temp\|cold\|quality_temp\|temperature'). Lookup tables would be more efficient than regex pattern matching. | Create lookup table mapping and measure performance difference vs REGEXP_LIKE |
 | o3 | adjustment_group logic | Multiple CASE | Simplified Logic | Complex nested CASE statements with 10+ conditions could be simplified with standardized reason codes or lookup tables. | Analyze CASE statement complexity and frequency of condition matches |
-| Final | Aggregation patterns | Various | Optimized GROUP BY | Final SELECT uses COUNT, SUM, and conditional aggregations that could benefit from pre-aggregation or materialized views for frequently accessed data. | Measure aggregation performance and identify pre-computation opportunities |
+| mdf | date_calculations | Multiple COALESCE | Simplified Logic | The mdf CTE uses complex COALESCE operations: COALESCE(dropoff_complete_time_local, eta_at_order_placement_time_local, DATE_ADD('hour', 1, order_created_time_local)). Standardized date hierarchy could simplify this. | Analyze the frequency and performance impact of multi-level COALESCE operations |
+| o | window_functions | Implicit | Explicit Optimization | Query uses MAX_BY functions which are window function equivalents. Consider if explicit window functions with PARTITION BY would be more efficient for large datasets. | Evaluate MAX_BY vs ROW_NUMBER() OVER() performance characteristics |
+| All CTEs | partition_strategy | Date-based | Optimized Partitioning | Large fact tables (order_contribution_profit_fact, managed_delivery_fact_v2) could benefit from optimized partitioning strategies beyond simple date partitioning. | Analyze access patterns and suggest partition pruning improvements |
 
 ## Section 2: Filter Application (Correctness & Efficiency)
 
@@ -75,7 +77,11 @@ Several filters could potentially be applied earlier in the query for improved p
 
 4. **COALESCE Operations**: Multiple COALESCE operations for date calculations could be simplified if source data quality were improved.
 
-5. **Complex CASE Statements**: The query contains multiple nested CASE statements with up to 10+ conditions each for reason categorization, which could benefit from lookup table approaches.
+6. **Complex Date Logic**: The query uses multiple nested COALESCE operations for date calculations (e.g., in mdf CTE), creating potential performance bottlenecks and maintenance complexity.
+
+7. **Window Function Alternatives**: MAX_BY functions could potentially be optimized with explicit window functions for better query plan optimization in large datasets.
+
+8. **Partitioning Strategy**: Large fact tables may benefit from more sophisticated partitioning beyond simple date-based approaches to improve query pruning.
 
 ## Validation Requirements
 
@@ -90,3 +96,6 @@ The Python validation script should test the following hypotheses:
 7. Analyze REGEXP_LIKE pattern complexity and suggest lookup table alternatives
 8. Evaluate CASE statement logic complexity and optimization opportunities
 9. Measure potential performance gains from aggregation optimizations
+10. Analyze date calculation complexity and COALESCE operation impact
+11. Evaluate window function vs MAX_BY performance characteristics  
+12. Assess partitioning strategy effectiveness for large fact tables
