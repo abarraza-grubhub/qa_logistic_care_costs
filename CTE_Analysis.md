@@ -5,13 +5,25 @@ This document provides a detailed, column-level logical analysis of each Common 
 ## Analysis Overview
 The query processes order fulfillment care costs through 11 CTEs that progressively build upon each other. The main data flow is: source data extraction → reason standardization → data integration → cost calculation → final aggregation. Key business logic includes extensive regex-based reason categorization and hierarchical cost attribution.
 
+**Critical Data Quality Patterns Identified:**
+- Extensive use of MAX_BY functions suggests potential duplicate records in source tables
+- Multiple COALESCE and fallback logic patterns indicate missing data handling is a significant concern
+- Regex pattern duplication across CTEs creates maintenance risks
+- Hierarchical reason attribution may mask underlying data quality issues
+
+**Performance and Complexity Considerations:**
+- Complex regex matching in o CTE applied to large datasets may impact performance
+- Multiple LEFT JOINs in primary integration CTE (o) could benefit from indexing analysis
+- Hardcoded UUID lists in market segmentation create maintenance overhead
+- Extensive CASE statement logic suggests potential for lookup table optimization
+
 ## CTE: adj
 Purpose: Identifies orders with Grubhub-paid refunds and retrieves the latest adjustment reason and associated contact reason for each order.
 
 | Column Name | Source | Derivation Logic | Notes / Questions |
 |-------------|--------|------------------|-------------------|
 | order_uuid | source_cass_rainbow_data.adjustment_reporting.order_uuid | Direct selection from the source table | None |
-| adjustment_reason_name | source_cass_rainbow_data.adjustment_reporting.reason | Uses MAX_BY function to get the reason corresponding to the latest adjustment_timestamp_utc for each order | Question: The context mentions this is the "formally recorded cause" but doesn't specify the complete set of possible values or their standardization rules. What is the authoritative list of adjustment reason values? |
+| adjustment_reason_name | source_cass_rainbow_data.adjustment_reporting.reason | Uses MAX_BY function to get the reason corresponding to the latest adjustment_timestamp_utc for each order | Question: The use of MAX_BY suggests multiple adjustment records per order are possible. What is the frequency of multiple adjustments per order, and could this aggregation be masking important business insights about repeated adjustment patterns? |
 | adj_contact_reason | source_zendesk_ref.secondary_contact_reason.name, source_zendesk_ref.primary_contact_reason.name | Uses MAX_BY with COALESCE(sr.name, pr.name) to get the contact reason corresponding to the latest adjustment_timestamp_utc, prioritizing secondary over primary | Question: What is the business rationale for prioritizing secondary contact reason over primary contact reason? Is this hierarchy documented in business requirements? |
 
 ## CTE: ghg  
@@ -65,7 +77,7 @@ Purpose: Retrieves comprehensive delivery and operational data for Grubhub-manag
 | mealtime | integrated_delivery.managed_delivery_fact_v2.mealtime | Direct selection from the source table | None |
 | delivery_eta_type | integrated_delivery.managed_delivery_fact_v2.delivery_eta_type | Direct selection from the source table | Question: What are the possible values for delivery_eta_type and what do they represent? |
 | CA_Market | integrated_delivery.managed_delivery_fact_v2.region_name | CASE statement that returns 'CA' if region_name starts with 'CA%', otherwise 'xCA' | Question: Is the 'CA%' pattern reliable for identifying California markets? Are there any edge cases? |
-| NYC_Market | integrated_delivery.managed_delivery_fact_v2.region_uuid | CASE statement with hardcoded list of 17 specific region UUIDs that map to 'DCWP', otherwise 'xDCWP' | Question: This hardcoded list seems brittle. Is there a more maintainable way to identify DCWP markets? What do these UUIDs specifically represent? |
+| NYC_Market | integrated_delivery.managed_delivery_fact_v2.region_uuid | CASE statement with hardcoded list of 17 specific region UUIDs that map to 'DCWP', otherwise 'xDCWP' | Question: This hardcoded UUID list creates maintenance overhead and potential data inconsistency. Is there a reference table or more maintainable approach for identifying DCWP markets? Additionally, what is the business impact if new regions are added to this market segment but the query isn't updated? |
 | bundle_ind | integrated_delivery.managed_delivery_fact_v2.bundle_type | Boolean logic checking if bundle_type IS NOT NULL | Question: What constitutes a bundle and what are the possible bundle_type values? |
 | future | integrated_delivery.managed_delivery_fact_v2.future_order_ind | Boolean conversion with explicit TRUE/FALSE casting | None |
 | start_of_week | integrated_delivery.managed_delivery_fact_v2.dropoff_complete_time_local, eta_at_order_placement_time_local, order_created_time_local | Complex DATE and DATE_TRUNC logic using COALESCE with fallback hierarchy | Question: Why this specific fallback hierarchy? What's the business significance of using eta_at_order_placement_time_local as middle priority? |
@@ -75,7 +87,7 @@ Purpose: Retrieves comprehensive delivery and operational data for Grubhub-manag
 | deliverytime_utc | integrated_delivery.managed_delivery_fact_v2.dropoff_complete_time_utc, eta_at_order_placement_time_utc, order_created_time_utc | COALESCE hierarchy similar to date fields but in UTC | None |
 | dayofweek | integrated_delivery.managed_delivery_fact_v2.dropoff_complete_time_local, eta_at_order_placement_time_local, order_created_time_local | FORMAT_DATETIME with 'E' format applied to COALESCE hierarchy | None |
 | datetime_local | integrated_delivery.managed_delivery_fact_v2.dropoff_complete_time_local, eta_at_order_placement_time_local, order_created_time_local | Direct COALESCE hierarchy without additional transformation | None |
-| diner_ty_eta | integrated_delivery.managed_delivery_fact_v2 (multiple timestamp fields) | Complex calculation involving DATE_DIFF between order creation/delivery creation time and lower_bound_eta, converted to minutes | Question: What does "diner_ty_eta" stand for? The logic seems to calculate ETA duration but the business meaning isn't clear from context. |
+| diner_ty_eta | integrated_delivery.managed_delivery_fact_v2 (multiple timestamp fields) | Complex calculation: DATE_DIFF('second', IF(future_order_ind IS NULL OR FALSE, order_created_time_utc, delivery_created_time_utc), lower_bound_eta_at_order_placement_time_utc) / 60.0 - calculates time difference in minutes between order/delivery creation and ETA lower bound | Question: The acronym "diner_ty_eta" is unclear - does "ty" stand for "thank you" or something else? More importantly, this calculation has different behavior for future vs immediate orders - are both use cases documented, and what are the business implications of using different baseline timestamps? |
 | dropoff_complete_time_utc | integrated_delivery.managed_delivery_fact_v2.dropoff_complete_time_utc | Direct selection from the source table | None |
 | ghd_eta_utc | integrated_delivery.managed_delivery_fact_v2.eta_at_order_placement_time_utc | Adds 10 minutes to eta_at_order_placement_time_utc | Question: Why exactly 10 minutes? Is this a standard buffer time for GHD deliveries? |
 | ghd_late_ind | integrated_delivery.managed_delivery_fact_v2.eta_at_order_placement_time_utc, dropoff_complete_time_utc | CASE statement checking if actual delivery time exceeds estimated time (plus 10 minute buffer) | [Interpretation] This is the primary lateness indicator for GHD orders |
@@ -124,14 +136,14 @@ Purpose: Integrates operational and financial data, standardizes issue reasons, 
 | cancel_reason_name | cancels.cancel_reason_name | Direct selection from cancels CTE | None |
 | cancel_contact_reason | cancels.cancel_contact_reason | Direct selection from cancels CTE | None |
 | ghd_late_ind | mdf.ghd_late_ind | Uses COALESCE to default to 0 if null | None |
-| ghd_late_ind_incl_cancel_time | mdf.ghd_late_ind, cancels.cancel_time_utc, mdf.ghd_eta_utc, mdf.dropoff_complete_time_utc | Complex CASE statement that includes cancellations after ETA as late deliveries when no completion time exists | Question: This seems like an important business rule. Can the logic for including cancelled orders in lateness metrics be documented more clearly? |
+| ghd_late_ind_incl_cancel_time | mdf.ghd_late_ind, cancels.cancel_time_utc, mdf.ghd_eta_utc, mdf.dropoff_complete_time_utc | Complex CASE statement: when ghd_late_ind = 1 then 1; when cancel_time_utc > ghd_eta_utc AND dropoff_complete_time_utc IS NULL then 1; else 0 - extends lateness definition to include cancellations that occur after ETA when no delivery completion exists | Question: This business rule significantly expands the definition of "lateness" to include post-ETA cancellations. How does this align with customer experience metrics and SLA definitions? Should cancelled orders be treated equivalently to late deliveries in performance reporting? |
 | adjustment_reason_name | adj.adjustment_reason_name, adj.adj_contact_reason, cancels.cancel_contact_reason | Extensive CASE statement with REGEXP_LIKE patterns that standardizes various reason texts into consistent categories: 'food temperature', 'incorrect order', 'food damaged', 'missing item', 'item removed from order', 'late order', 'order or menu issue', 'out of item', 'missed delivery', plus special handling for generic 'refund due to' patterns | Question: This standardization logic contains numerous hardcoded regex patterns (e.g., 'food temp\|cold\|quality_temp\|temperature'). Is there a centralized reference document for all these patterns? How are new reason types or pattern variations handled when they appear in production data? |
 | adj_contact_reason | adj.adj_contact_reason | Direct selection from adj CTE | None |
 | driver_pay_per_order | integrated_order.order_contribution_profit_fact.driver_pay_per_order | Direct selection from the source table | None |
 | tip | integrated_order.order_contribution_profit_fact.tip | Direct selection from the source table | None |
 | bundle_ind | mdf.bundle_ind | Direct selection from mdf CTE | None |
 | fg_reason | ghg.fg_reason, care_fg.fg_reason, integrated_order.order_contribution_profit_fact.cp_care_concession_awarded_amount | Complex CASE statement that only processes when cp_care_concession_awarded_amount ≠ 0, then applies identical REGEXP_LIKE patterns as adjustment_reason_name to standardize fg_reason values | Question: The regex standardization patterns are duplicated from the adjustment_reason_name logic. Should these be consolidated into a shared function or reference table to maintain consistency and reduce maintenance overhead? |
-| care_cost_reason | csv_sandbox.care_cost_reasons.care_cost_reason | Direct selection joined on latest_contact_reason | Question: The context mentions this excludes certain contact reasons. What are the specific exclusion criteria? |
+| care_cost_reason | csv_sandbox.care_cost_reasons.care_cost_reason | Direct selection joined on contacts.latest_contact_reason = ccr.scr (secondary contact reason) | Question: The join is specifically on secondary contact reason (scr), but earlier CTEs prioritize secondary over primary reasons. Is there a corresponding lookup for primary contact reasons, and what percentage of contacts would be excluded due to this specific join condition? |
 | care_cost_group | csv_sandbox.care_cost_reasons.care_cost_group | Uses COALESCE to default to 'not grouped' if null | None |
 | cp_care_concession_awarded_amount | integrated_order.order_contribution_profit_fact.cp_care_concession_awarded_amount | Direct selection from the source table | None |
 | cp_grub_care_refund | integrated_order.order_contribution_profit_fact.cp_grub_care_refund | Direct selection from the source table | None |
@@ -145,7 +157,7 @@ Purpose: Creates a consolidated reason field by prioritizing cancellation reason
 |-------------|--------|------------------|-------------------|
 | adjustment_and_cancel_reason_combined | o.cancel_reason_name, o.adjustment_reason_name | CASE statement with specific logic: when cancel_reason_name = 'Not Mapped' then adjustment_reason_name; when cancel_reason_name IS NULL then adjustment_reason_name; else LOWER(cancel_reason_name) | Question: Why is the 'Not Mapped' literal value treated equivalently to NULL? Is 'Not Mapped' a standard placeholder value in the cancellation reason data, and what are the data quality implications of this fallback logic? |
 
-*Note: Most other columns from the o CTE are passed through directly without modification*
+*Note: This CTE serves as a pass-through layer with minimal transformation, focusing solely on reason consolidation. All other columns (dates, costs, indicators, etc.) are passed through unchanged, suggesting this step is primarily for simplifying downstream logic.*
 
 ## CTE: o3
 Purpose: Calculates total care cost and derives final analytical reason groups for aggregation.
@@ -172,5 +184,5 @@ Purpose: Aggregates order-level data into summarized metrics grouped by key anal
 | distinct_order_uuid | o3.order_uuid | COUNT(DISTINCT order_uuid) | Check for potential duplication in the dataset |
 | total_care_cost | o3.total_care_cost | SUM of total_care_cost | Primary aggregated metric |
 | ghd_orders | o3.ghd_ind | SUM with IF condition counting records where ghd_ind = 'ghd' | Count of Grubhub-delivered orders |
-| orders_with_care_cost | o3.cp_diner_adj, o3.cp_care_concession_awarded_amount, o3.cp_care_ticket_cost | SUM with IF condition counting records where the sum of three cost components is negative | Question: Why specifically these three components and not the full total_care_cost? What about redelivery and refund costs? |
-| cancels_osmf_definition | o3.order_status_cancel_ind, o3.order_uuid | COUNT with CASE condition counting records where order_status_cancel_ind = TRUE | Question: What does "osmf_definition" stand for? How does this differ from other cancellation indicators in the query? |
+| orders_with_care_cost | o3.cp_diner_adj, o3.cp_care_concession_awarded_amount, o3.cp_care_ticket_cost | SUM with IF condition counting records where (cp_diner_adj + cp_care_concession_awarded_amount + cp_care_ticket_cost) < 0 | Question: This metric excludes cp_redelivery_cost and cp_grub_care_refund from the total_care_cost calculation used elsewhere in the query. What is the business rationale for using a subset of cost components here? Are redelivery and refund costs not considered "care costs" for this particular metric? |
+| cancels_osmf_definition | o3.order_status_cancel_ind, o3.order_uuid | COUNT with CASE condition counting records where order_status_cancel_ind = TRUE | Question: The "osmf_definition" suffix is unclear - does this refer to a specific system or methodology? How does this cancellation count differ from other cancellation indicators used throughout the query (cancel_ind, cancel_fact_ind), and when should each be used? |
