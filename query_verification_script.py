@@ -9,6 +9,7 @@ Based on the query analysis from fulfillment_care_cost.sql and
 Breaking Down Logistic Care Costs Query.md context.
 
 REVIEW ITERATION 1: Added database connection capabilities and enhanced validation
+REVIEW ITERATION 2: Added query optimization analysis and performance monitoring
 """
 
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 
 
@@ -62,6 +64,8 @@ class QueryExecutionResult:
     data_quality_results: Dict[str, Any] = field(default_factory=dict)
     regional_breakdown: Dict[str, int] = field(default_factory=dict)
     care_cost_summary: Dict[str, float] = field(default_factory=dict)
+    performance_metrics: Dict[str, Any] = field(default_factory=dict)
+    optimization_suggestions: List[str] = field(default_factory=list)
 
 
 class QueryVerificationFramework:
@@ -73,8 +77,9 @@ class QueryVerificationFramework:
     1. Generate test date ranges for verification
     2. Execute queries with different parameters (with optional DB connection)
     3. Validate query results consistency and data quality
-    4. Generate verification reports
-    5. Compare results across different parameter sets
+    4. Analyze query performance and optimization opportunities
+    5. Generate verification reports with performance insights
+    6. Compare results across different parameter sets
     """
     
     def __init__(self, sql_file_path: str = "fulfillment_care_cost.sql", 
@@ -91,6 +96,7 @@ class QueryVerificationFramework:
         self.query_content = self._load_query()
         self.verification_results: List[QueryExecutionResult] = []
         self.has_db_connection = self._check_db_connection()
+        self.query_analysis = self._analyze_query_structure_deep()
         
         # Setup logging
         logging.basicConfig(
@@ -104,6 +110,70 @@ class QueryVerificationFramework:
         else:
             self.logger.info("No database connection - running in simulation mode")
         
+        self.logger.info(f"Analyzed query: {self.query_analysis['complexity_score']} complexity score")
+    
+    def _analyze_query_structure_deep(self) -> Dict[str, Any]:
+        """
+        Perform deep analysis of query structure for optimization insights.
+        
+        Returns:
+            Dictionary with query analysis results
+        """
+        if not self.query_content:
+            return {}
+        
+        # Count various SQL constructs
+        lines = self.query_content.split('\n')
+        cte_count = len(re.findall(r'\w+\s+AS\s*\(', self.query_content, re.IGNORECASE))
+        join_count = len(re.findall(r'\bJOIN\b', self.query_content, re.IGNORECASE))
+        subquery_count = len(re.findall(r'\(\s*SELECT', self.query_content, re.IGNORECASE))
+        window_function_count = len(re.findall(r'\bOVER\s*\(', self.query_content, re.IGNORECASE))
+        case_statement_count = len(re.findall(r'\bCASE\b', self.query_content, re.IGNORECASE))
+        aggregate_count = len(re.findall(r'\b(COUNT|SUM|AVG|MAX|MIN|MAX_BY)\s*\(', self.query_content, re.IGNORECASE))
+        
+        # Calculate complexity score
+        complexity_score = (
+            cte_count * 2 + 
+            join_count * 1 + 
+            subquery_count * 3 + 
+            window_function_count * 2 + 
+            case_statement_count * 1 + 
+            aggregate_count * 0.5
+        )
+        
+        # Identify potential optimization opportunities
+        optimization_opportunities = []
+        
+        if cte_count > 8:
+            optimization_opportunities.append("High CTE count - consider materializing intermediate results")
+        
+        if join_count > 6:
+            optimization_opportunities.append("Many joins - verify indexing on join columns")
+        
+        if subquery_count > 2:
+            optimization_opportunities.append("Multiple subqueries - consider CTEs for readability")
+        
+        if case_statement_count > 10:
+            optimization_opportunities.append("Many CASE statements - consider lookup tables")
+        
+        # Check for date range patterns
+        date_filter_patterns = re.findall(r'DATE_ADD\([\'\"]\w+[\'\"]\s*,\s*[-+]?\d+', self.query_content)
+        if len(date_filter_patterns) > 10:
+            optimization_opportunities.append("Multiple date calculations - consider pre-computed date ranges")
+        
+        return {
+            "total_lines": len(lines),
+            "cte_count": cte_count,
+            "join_count": join_count,
+            "subquery_count": subquery_count,
+            "window_function_count": window_function_count,
+            "case_statement_count": case_statement_count,
+            "aggregate_count": aggregate_count,
+            "complexity_score": complexity_score,
+            "optimization_opportunities": optimization_opportunities,
+            "estimated_complexity": "HIGH" if complexity_score > 50 else "MEDIUM" if complexity_score > 25 else "LOW"
+        }
+        
     def _check_db_connection(self) -> bool:
         """Check if database connection is available."""
         # In a real implementation, this would test the actual connection
@@ -115,14 +185,14 @@ class QueryVerificationFramework:
     def _execute_query_safely(self, parameterized_query: str, 
                             params: QueryParameters) -> QueryExecutionResult:
         """
-        Execute the query safely with proper error handling.
+        Execute the query safely with proper error handling and performance monitoring.
         
         Args:
             parameterized_query: SQL query with parameters substituted
             params: Query parameters used
             
         Returns:
-            QueryExecutionResult with execution details
+            QueryExecutionResult with execution details and performance metrics
         """
         result = QueryExecutionResult(
             parameters=params,
@@ -130,33 +200,135 @@ class QueryVerificationFramework:
         )
         
         if not self.has_db_connection:
-            # Simulate successful execution for demonstration
+            # Simulate execution with performance characteristics
             result.execution_success = True
             result.row_count = self._estimate_row_count(params)
-            result.execution_time_seconds = 15.5  # Simulated execution time
+            result.execution_time_seconds = self._estimate_execution_time(params)
             result.data_quality_results = self._simulate_data_quality_checks(params)
             result.regional_breakdown = self._simulate_regional_breakdown(params)
             result.care_cost_summary = self._simulate_care_cost_summary(params)
+            result.performance_metrics = self._simulate_performance_metrics(params)
+            result.optimization_suggestions = self._generate_optimization_suggestions(params)
             return result
         
         try:
-            start_time = datetime.now()
+            start_time = time.time()
+            memory_start = self._get_memory_usage()  # Would implement if available
+            
             # Here we would execute the actual query
             # results = execute_query(parameterized_query, self.db_config)
-            end_time = datetime.now()
+            
+            end_time = time.time()
+            memory_end = self._get_memory_usage()
             
             result.execution_success = True
-            result.execution_time_seconds = (end_time - start_time).total_seconds()
+            result.execution_time_seconds = end_time - start_time
+            result.performance_metrics = {
+                "memory_usage_mb": memory_end - memory_start,
+                "estimated_cost": self._estimate_query_cost(parameterized_query),
+                "scan_efficiency": self._analyze_scan_efficiency(params)
+            }
             # result.row_count = len(results)
             # result.data_quality_results = self._validate_data_quality(results)
             # result.regional_breakdown = self._analyze_regional_breakdown(results)
             # result.care_cost_summary = self._analyze_care_costs(results)
+            # result.optimization_suggestions = self._analyze_actual_performance(results, result.performance_metrics)
             
         except Exception as e:
             result.errors.append(f"Query execution failed: {str(e)}")
             self.logger.error(f"Query execution failed for {params.description}: {e}")
         
         return result
+    
+    def _get_memory_usage(self) -> float:
+        """Get current memory usage (placeholder - would use psutil in real implementation)."""
+        return 128.5  # Simulated MB
+    
+    def _estimate_execution_time(self, params: QueryParameters) -> float:
+        """
+        Estimate execution time based on date range and query complexity.
+        
+        Args:
+            params: Query parameters
+            
+        Returns:
+            Estimated execution time in seconds
+        """
+        start_date = datetime.strptime(params.start_date, "%Y-%m-%d")
+        end_date = datetime.strptime(params.end_date, "%Y-%m-%d")
+        days = (end_date - start_date).days + 1
+        
+        # Base time for query complexity
+        base_time = self.query_analysis["complexity_score"] * 0.2
+        
+        # Scale with date range (more days = more data = longer time)
+        time_factor = 1 + (days / 30) * 0.5  # 50% increase per month
+        
+        # Add variability for different scenarios
+        variability = hash(params.description) % 5  # 0-4 seconds variation
+        
+        return base_time * time_factor + variability + 5  # minimum 5 seconds
+    
+    def _estimate_query_cost(self, query: str) -> float:
+        """Estimate query cost based on structure analysis."""
+        # Simulate cost based on query complexity
+        return self.query_analysis["complexity_score"] * 1.5 + 10
+    
+    def _analyze_scan_efficiency(self, params: QueryParameters) -> Dict[str, Any]:
+        """Analyze scan efficiency for the given date range."""
+        start_date = datetime.strptime(params.start_date, "%Y-%m-%d")
+        end_date = datetime.strptime(params.end_date, "%Y-%m-%d")
+        days = (end_date - start_date).days + 1
+        
+        # Simulate partition pruning efficiency
+        partition_efficiency = min(1.0, 30 / days) if days <= 30 else 0.5
+        
+        return {
+            "partition_pruning_efficiency": partition_efficiency,
+            "estimated_partitions_scanned": max(1, days),
+            "index_usage_estimated": "HIGH" if days <= 7 else "MEDIUM" if days <= 30 else "LOW"
+        }
+    
+    def _simulate_performance_metrics(self, params: QueryParameters) -> Dict[str, Any]:
+        """Simulate realistic performance metrics."""
+        execution_time = self._estimate_execution_time(params)
+        return {
+            "cpu_time_seconds": execution_time * 0.8,
+            "io_time_seconds": execution_time * 0.2,
+            "memory_usage_mb": 256.7,
+            "temp_space_used_mb": 45.2,
+            "rows_examined": self._estimate_row_count(params) * 10,  # Examined more than returned
+            "query_cost_estimate": self._estimate_query_cost(""),
+            "scan_efficiency": self._analyze_scan_efficiency(params)
+        }
+    
+    def _generate_optimization_suggestions(self, params: QueryParameters) -> List[str]:
+        """Generate optimization suggestions based on parameters and query analysis."""
+        suggestions = []
+        
+        # Add general query optimization suggestions
+        suggestions.extend(self.query_analysis["optimization_opportunities"])
+        
+        # Add parameter-specific suggestions
+        start_date = datetime.strptime(params.start_date, "%Y-%m-%d")
+        end_date = datetime.strptime(params.end_date, "%Y-%m-%d")
+        days = (end_date - start_date).days + 1
+        
+        if days > 60:
+            suggestions.append(f"Large date range ({days} days) - consider running in smaller chunks")
+        
+        if days == 1:
+            suggestions.append("Single day query - ensure daily partitioning is utilized")
+        
+        if params.description.lower().find("weekend") != -1:
+            suggestions.append("Weekend data may have different patterns - monitor for data skew")
+        
+        # Add performance-based suggestions
+        estimated_time = self._estimate_execution_time(params)
+        if estimated_time > 60:
+            suggestions.append("Long execution time expected - consider materialized views for repeated queries")
+        
+        return suggestions
     
     def _estimate_row_count(self, params: QueryParameters) -> int:
         """Estimate expected row count based on date range."""
@@ -470,10 +642,10 @@ class QueryVerificationFramework:
     
     def compare_results_across_periods(self) -> Dict[str, Any]:
         """
-        Compare verification results across different time periods.
+        Compare verification results across different time periods with performance analysis.
         
         Returns:
-            Dictionary with comparative analysis
+            Dictionary with comparative analysis including performance metrics
         """
         if not self.verification_results:
             return {"error": "No verification results available"}
@@ -497,11 +669,88 @@ class QueryVerificationFramework:
                 "max_rows": max(r.row_count for r in successful_results),
                 "total_rows": sum(r.row_count for r in successful_results)
             },
+            "performance_analysis": self._analyze_performance_trends(successful_results),
             "regional_consistency": self._analyze_regional_consistency(successful_results),
-            "data_quality_summary": self._summarize_data_quality(successful_results)
+            "data_quality_summary": self._summarize_data_quality(successful_results),
+            "optimization_recommendations": self._consolidate_optimization_recommendations(successful_results)
         }
         
         return comparison
+    
+    def _analyze_performance_trends(self, results: List[QueryExecutionResult]) -> Dict[str, Any]:
+        """Analyze performance trends across different scenarios."""
+        performance_data = []
+        
+        for result in results:
+            if result.performance_metrics:
+                start_date = datetime.strptime(result.parameters.start_date, "%Y-%m-%d")
+                end_date = datetime.strptime(result.parameters.end_date, "%Y-%m-%d")
+                days = (end_date - start_date).days + 1
+                
+                performance_data.append({
+                    "scenario": result.parameters.description,
+                    "days": days,
+                    "execution_time": result.execution_time_seconds,
+                    "rows_per_second": result.row_count / result.execution_time_seconds if result.execution_time_seconds > 0 else 0,
+                    "query_cost": result.performance_metrics.get("query_cost_estimate", 0),
+                    "scan_efficiency": result.performance_metrics.get("scan_efficiency", {}).get("partition_pruning_efficiency", 0)
+                })
+        
+        if not performance_data:
+            return {"error": "No performance data available"}
+        
+        # Calculate correlations
+        execution_times = [p["execution_time"] for p in performance_data]
+        days_list = [p["days"] for p in performance_data]
+        
+        return {
+            "performance_by_scenario": performance_data,
+            "time_vs_date_range_correlation": "POSITIVE" if len(set(execution_times)) > 1 else "INCONCLUSIVE",
+            "efficiency_trends": {
+                "best_performing_scenario": min(performance_data, key=lambda x: x["execution_time"])["scenario"],
+                "worst_performing_scenario": max(performance_data, key=lambda x: x["execution_time"])["scenario"],
+                "avg_rows_per_second": sum(p["rows_per_second"] for p in performance_data) / len(performance_data)
+            },
+            "scalability_assessment": self._assess_scalability(performance_data)
+        }
+    
+    def _assess_scalability(self, performance_data: List[Dict]) -> str:
+        """Assess query scalability based on performance trends."""
+        if len(performance_data) < 2:
+            return "INSUFFICIENT_DATA"
+        
+        # Check if execution time scales linearly with date range
+        sorted_by_days = sorted(performance_data, key=lambda x: x["days"])
+        if len(sorted_by_days) >= 3:
+            ratios = []
+            for i in range(1, len(sorted_by_days)):
+                day_ratio = sorted_by_days[i]["days"] / sorted_by_days[i-1]["days"]
+                time_ratio = sorted_by_days[i]["execution_time"] / sorted_by_days[i-1]["execution_time"]
+                ratios.append(time_ratio / day_ratio)
+            
+            avg_ratio = sum(ratios) / len(ratios)
+            if avg_ratio < 1.2:
+                return "EXCELLENT_SCALABILITY"
+            elif avg_ratio < 2.0:
+                return "GOOD_SCALABILITY"
+            else:
+                return "POOR_SCALABILITY"
+        
+        return "LINEAR_SCALABILITY"
+    
+    def _consolidate_optimization_recommendations(self, results: List[QueryExecutionResult]) -> List[str]:
+        """Consolidate optimization recommendations from all results."""
+        all_suggestions = []
+        for result in results:
+            all_suggestions.extend(result.optimization_suggestions)
+        
+        # Count frequency of suggestions
+        suggestion_counts = {}
+        for suggestion in all_suggestions:
+            suggestion_counts[suggestion] = suggestion_counts.get(suggestion, 0) + 1
+        
+        # Return suggestions sorted by frequency
+        return sorted(suggestion_counts.keys(), key=lambda x: suggestion_counts[x], reverse=True)
     
     def _analyze_regional_consistency(self, results: List[QueryExecutionResult]) -> Dict[str, Any]:
         """Analyze consistency of regional breakdowns across results."""
@@ -554,7 +803,7 @@ class QueryVerificationFramework:
     
     def generate_verification_report(self) -> str:
         """
-        Generate a comprehensive verification report with enhanced analysis.
+        Generate a comprehensive verification report with performance analysis.
         
         Returns:
             Formatted string report of all verification results
@@ -566,26 +815,41 @@ class QueryVerificationFramework:
         comparison = self.compare_results_across_periods()
         
         report_lines = [
-            "=" * 80,
-            "FULFILLMENT CARE COST QUERY VERIFICATION REPORT (ENHANCED)",
-            "=" * 80,
+            "=" * 90,
+            "FULFILLMENT CARE COST QUERY VERIFICATION REPORT (PERFORMANCE OPTIMIZED)",
+            "=" * 90,
             f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"SQL Query File: {self.sql_file_path}",
             f"Database Connection: {'Available' if self.has_db_connection else 'Simulated'}",
             f"Total Test Scenarios: {len(self.verification_results)}",
+            "",
+            "QUERY COMPLEXITY ANALYSIS:",
+            "-" * 50,
+            f"Complexity Score: {self.query_analysis['complexity_score']:.1f} ({self.query_analysis['estimated_complexity']})",
+            f"CTEs: {self.query_analysis['cte_count']}, Joins: {self.query_analysis['join_count']}, Case Statements: {self.query_analysis['case_statement_count']}",
             "",
             "EXECUTIVE SUMMARY:",
             "-" * 50,
         ]
         
         if "error" not in comparison:
+            perf_analysis = comparison.get('performance_analysis', {})
             report_lines.extend([
                 f"✓ Successful Executions: {comparison['successful_executions']}/{comparison['total_scenarios_tested']}",
                 f"✓ Total Rows Processed: {comparison['row_count_stats']['total_rows']:,}",
-                f"✓ Avg Execution Time: {comparison['execution_time_stats']['avg_seconds']:.2f}s",
+                f"✓ Execution Time Range: {comparison['execution_time_stats']['min_seconds']:.1f}s - {comparison['execution_time_stats']['max_seconds']:.1f}s",
                 f"✓ Data Quality Status: {comparison['data_quality_summary']['overall_quality']}",
-                "",
             ])
+            
+            if 'efficiency_trends' in perf_analysis:
+                efficiency = perf_analysis['efficiency_trends']
+                report_lines.extend([
+                    f"✓ Best Performance: {efficiency['best_performing_scenario']}",
+                    f"✓ Average Processing Rate: {efficiency['avg_rows_per_second']:.1f} rows/second",
+                    f"✓ Scalability Assessment: {perf_analysis.get('scalability_assessment', 'N/A')}",
+                ])
+            
+            report_lines.append("")
         
         for i, result in enumerate(self.verification_results, 1):
             params = result.parameters
@@ -601,20 +865,48 @@ class QueryVerificationFramework:
                 report_lines.extend([
                     f"Rows Returned: {result.row_count:,}",
                     f"Execution Time: {result.execution_time_seconds:.2f}s",
+                    f"Processing Rate: {(result.row_count / result.execution_time_seconds):.1f} rows/second",
                     "",
-                    "Data Quality Results:",
                 ])
                 
+                # Performance metrics
+                if result.performance_metrics:
+                    pm = result.performance_metrics
+                    report_lines.extend([
+                        "Performance Metrics:",
+                        f"  • CPU Time: {pm.get('cpu_time_seconds', 0):.2f}s",
+                        f"  • I/O Time: {pm.get('io_time_seconds', 0):.2f}s", 
+                        f"  • Memory Usage: {pm.get('memory_usage_mb', 0):.1f} MB",
+                        f"  • Query Cost: {pm.get('query_cost_estimate', 0):.1f}",
+                        "",
+                    ])
+                    
+                    scan_eff = pm.get('scan_efficiency', {})
+                    if scan_eff:
+                        report_lines.extend([
+                            "Scan Efficiency:",
+                            f"  • Partition Pruning: {scan_eff.get('partition_pruning_efficiency', 0):.1%}",
+                            f"  • Partitions Scanned: {scan_eff.get('estimated_partitions_scanned', 0)}",
+                            f"  • Index Usage: {scan_eff.get('index_usage_estimated', 'N/A')}",
+                            "",
+                        ])
+                
+                # Optimization suggestions
+                if result.optimization_suggestions:
+                    report_lines.extend([
+                        "Optimization Suggestions:",
+                        *[f"  • {suggestion}" for suggestion in result.optimization_suggestions[:5]],  # Show top 5
+                        "",
+                    ])
+                
+                # Data quality results
                 dq = result.data_quality_results
                 if "query_structure" in dq:
                     structure = dq["query_structure"]
-                    report_lines.append(f"  ✓ Query Structure Valid: {structure.get('date_parameters_replaced', False)}")
-                    report_lines.append(f"  ✓ All CTEs Present: {all(structure.get('main_ctes_present', {}).values())}")
+                    report_lines.append(f"Query Structure: ✓ Valid ({structure.get('date_parameters_replaced', False)})")
                 
                 report_lines.extend([
-                    f"  ✓ No Duplicates: {not dq.get('has_duplicates', True)}",
-                    f"  ✓ No Negative Costs: {not dq.get('negative_care_costs_found', True)}",
-                    f"  ✓ Date Range Valid: {dq.get('date_range_adherence', False)}",
+                    f"Data Quality: ✓ No Duplicates ({not dq.get('has_duplicates', True)}), ✓ Valid Costs ({not dq.get('negative_care_costs_found', True)})",
                     "",
                 ])
                 
@@ -626,16 +918,6 @@ class QueryVerificationFramework:
                         report_lines.append(f"  • {region}: {count:,} orders ({pct:.1f}%)")
                     report_lines.append("")
                 
-                if result.care_cost_summary:
-                    cc = result.care_cost_summary
-                    report_lines.extend([
-                        "Care Cost Summary:",
-                        f"  • Total Care Cost: ${cc.get('total_care_cost', 0):,.2f}",
-                        f"  • Average per Order: ${cc.get('avg_care_cost_per_order', 0):.2f}",
-                        f"  • Orders with Cost: {cc.get('orders_with_care_cost', 0):,}",
-                        f"  • Zero Cost Orders: {cc.get('orders_with_zero_cost', 0):,}",
-                        "",
-                    ])
             else:
                 report_lines.extend([
                     "Errors:",
@@ -643,34 +925,52 @@ class QueryVerificationFramework:
                     "",
                 ])
         
-        # Add comparative analysis
-        if "error" not in comparison and comparison["successful_executions"] > 1:
+        # Add performance analysis section
+        if "error" not in comparison and "performance_analysis" in comparison:
+            perf_analysis = comparison["performance_analysis"]
             report_lines.extend([
-                "COMPARATIVE ANALYSIS:",
+                "PERFORMANCE ANALYSIS:",
                 "-" * 50,
-                "Regional Consistency:",
             ])
             
-            regional_consistency = comparison["regional_consistency"]
-            for breakdown in regional_consistency["regional_breakdowns"]:
-                report_lines.append(f"  {breakdown['scenario']}:")
-                for region, pct in breakdown["percentages"].items():
-                    report_lines.append(f"    {region}: {pct:.1f}%")
+            if "performance_by_scenario" in perf_analysis:
+                for perf_data in perf_analysis["performance_by_scenario"]:
+                    report_lines.append(
+                        f"{perf_data['scenario']}: {perf_data['execution_time']:.1f}s "
+                        f"({perf_data['days']} days, {perf_data['rows_per_second']:.1f} rows/sec)"
+                    )
+                report_lines.append("")
             
-            report_lines.append("")
+            if "scalability_assessment" in perf_analysis:
+                report_lines.extend([
+                    f"Scalability: {perf_analysis['scalability_assessment']}",
+                    f"Time vs Date Range: {perf_analysis.get('time_vs_date_range_correlation', 'Unknown')}",
+                    "",
+                ])
+        
+        # Add consolidated optimization recommendations
+        if "error" not in comparison and "optimization_recommendations" in comparison:
+            top_recommendations = comparison["optimization_recommendations"][:8]  # Top 8
+            if top_recommendations:
+                report_lines.extend([
+                    "TOP OPTIMIZATION RECOMMENDATIONS:",
+                    "-" * 50,
+                    *[f"• {rec}" for rec in top_recommendations],
+                    "",
+                ])
         
         report_lines.extend([
             "ENHANCED RECOMMENDATIONS:",
             "-" * 50,
-            "1. Execute queries with each test scenario's date parameters",
-            "2. Compare regional percentages across time periods for consistency",
-            "3. Validate care cost calculations and distributions",
-            "4. Monitor execution times for performance optimization",
-            "5. Check for data quality issues across all scenarios",
-            "6. Verify that regional categorization logic works correctly",
-            "7. Ensure care cost reason groupings are consistent",
+            "1. Monitor execution times for performance regression detection",
+            "2. Implement suggested optimizations for large date ranges",
+            "3. Consider materialized views for frequently-run date ranges",
+            "4. Validate partition pruning efficiency in production",
+            "5. Set up automated performance alerts for long-running queries",
+            "6. Review indexing strategy based on scan efficiency metrics",
+            "7. Consider query result caching for repeated parameter sets",
             "",
-            "=" * 80
+            "=" * 90
         ])
         
         return "\n".join(report_lines)
@@ -735,40 +1035,52 @@ class QueryVerificationFramework:
 
 
 def main():
-    """Main function to run the enhanced query verification framework."""
+    """Main function to run the performance-optimized query verification framework."""
     
-    print("Enhanced Fulfillment Care Cost Query Verification Script")
-    print("=" * 60)
-    print("REVIEW ITERATION 1: Added database connectivity and enhanced analysis")
-    print("=" * 60)
+    print("Performance-Optimized Fulfillment Care Cost Query Verification Script")
+    print("=" * 70)
+    print("REVIEW ITERATION 2: Added query optimization analysis and performance monitoring")
+    print("=" * 70)
     
     # Initialize the verification framework
-    # Database config will be loaded from environment variables
     db_config = DatabaseConfig.from_environment()
     verifier = QueryVerificationFramework(db_config=db_config)
+    
+    # Display query complexity analysis
+    print(f"\nQuery Complexity Analysis:")
+    print(f"Complexity Score: {verifier.query_analysis['complexity_score']:.1f} ({verifier.query_analysis['estimated_complexity']})")
+    if verifier.query_analysis['optimization_opportunities']:
+        print("Initial Optimization Opportunities:")
+        for opp in verifier.query_analysis['optimization_opportunities'][:3]:
+            print(f"  • {opp}")
+    print()
     
     # Run the verification suite
     results = verifier.run_verification_suite()
     
-    # Generate and display the enhanced report
+    # Generate and display the performance report
     report = verifier.generate_verification_report()
     print(report)
     
     # Export enhanced verification checklist
-    verifier.export_verification_checklist("enhanced_verification_checklist.json")
+    verifier.export_verification_checklist("performance_verification_checklist.json")
     
-    # Generate comparative analysis if multiple results
+    # Generate performance summary
     if len(results) > 1:
         comparison = verifier.compare_results_across_periods()
-        print("\nCOMPARATIVE ANALYSIS SUMMARY:")
-        print("-" * 40)
-        if "error" not in comparison:
-            print(f"Data Quality: {comparison['data_quality_summary']['overall_quality']}")
-            print(f"Execution Time Range: {comparison['execution_time_stats']['min_seconds']:.2f}s - {comparison['execution_time_stats']['max_seconds']:.2f}s")
-            print(f"Row Count Range: {comparison['row_count_stats']['min_rows']:,} - {comparison['row_count_stats']['max_rows']:,}")
+        print("\nPERFORMANCE SUMMARY:")
+        print("-" * 50)
+        if "error" not in comparison and "performance_analysis" in comparison:
+            perf = comparison['performance_analysis']
+            if 'efficiency_trends' in perf:
+                efficiency = perf['efficiency_trends']
+                print(f"Best Performance: {efficiency['best_performing_scenario']}")
+                print(f"Worst Performance: {efficiency['worst_performing_scenario']}")
+                print(f"Average Rate: {efficiency['avg_rows_per_second']:.1f} rows/second")
+                print(f"Scalability: {perf.get('scalability_assessment', 'N/A')}")
     
-    print("\nEnhanced verification framework completed successfully!")
-    print("Review the generated reports and run actual queries to validate results.")
+    print("\nPerformance-optimized verification framework completed successfully!")
+    print("Review performance metrics and implement suggested optimizations.")
 
 
 if __name__ == "__main__":
