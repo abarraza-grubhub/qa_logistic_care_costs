@@ -1,0 +1,102 @@
+{
+  "verification_framework": {
+    "description": "Checklist for verifying fulfillment_care_cost.sql query across different dates and regions",
+    "generated_on": "2025-10-01T07:08:35.083432",
+    "sql_file": "fulfillment_care_cost.sql"
+  },
+  "test_scenarios": [
+    {
+      "start_date": "2024-10-01",
+      "end_date": "2024-10-01",
+      "description": "Single day test",
+      "verification_points": [
+        "Query executes successfully with dates 2024-10-01 to 2024-10-01",
+        "Results contain expected regional categories (CA, DCWP, ROM)",
+        "Care cost calculations are non-negative where expected",
+        "Order counts are reasonable for the date range",
+        "No duplicate order_uuid in results"
+      ]
+    },
+    {
+      "start_date": "2024-10-01",
+      "end_date": "2024-10-07",
+      "description": "Week-long period test",
+      "verification_points": [
+        "Query executes successfully with dates 2024-10-01 to 2024-10-07",
+        "Results contain expected regional categories (CA, DCWP, ROM)",
+        "Care cost calculations are non-negative where expected",
+        "Order counts are reasonable for the date range",
+        "No duplicate order_uuid in results"
+      ]
+    },
+    {
+      "start_date": "2024-10-01",
+      "end_date": "2024-10-30",
+      "description": "Month-long period test",
+      "verification_points": [
+        "Query executes successfully with dates 2024-10-01 to 2024-10-30",
+        "Results contain expected regional categories (CA, DCWP, ROM)",
+        "Care cost calculations are non-negative where expected",
+        "Order counts are reasonable for the date range",
+        "No duplicate order_uuid in results"
+      ]
+    },
+    {
+      "start_date": "2024-09-28",
+      "end_date": "2024-10-05",
+      "description": "Cross-month boundary test",
+      "verification_points": [
+        "Query executes successfully with dates 2024-09-28 to 2024-10-05",
+        "Results contain expected regional categories (CA, DCWP, ROM)",
+        "Care cost calculations are non-negative where expected",
+        "Order counts are reasonable for the date range",
+        "No duplicate order_uuid in results"
+      ]
+    },
+    {
+      "start_date": "2024-10-05",
+      "end_date": "2024-10-06",
+      "description": "Weekend period test",
+      "verification_points": [
+        "Query executes successfully with dates 2024-10-05 to 2024-10-06",
+        "Results contain expected regional categories (CA, DCWP, ROM)",
+        "Care cost calculations are non-negative where expected",
+        "Order counts are reasonable for the date range",
+        "No duplicate order_uuid in results"
+      ]
+    },
+    {
+      "start_date": "2024-10-07",
+      "end_date": "2024-10-11",
+      "description": "Business week test",
+      "verification_points": [
+        "Query executes successfully with dates 2024-10-07 to 2024-10-11",
+        "Results contain expected regional categories (CA, DCWP, ROM)",
+        "Care cost calculations are non-negative where expected",
+        "Order counts are reasonable for the date range",
+        "No duplicate order_uuid in results"
+      ]
+    }
+  ],
+  "verification_steps": {
+    "pre_execution": [
+      "Verify database connectivity",
+      "Confirm table permissions for all referenced tables",
+      "Validate date parameter format (YYYY-MM-DD)"
+    ],
+    "execution": [
+      "Run query with each test scenario parameters",
+      "Capture execution time and resource usage",
+      "Record row counts for each major CTE",
+      "Save results for comparison analysis"
+    ],
+    "post_execution": [
+      "Validate data quality checks pass",
+      "Verify business logic constraints",
+      "Confirm regional aggregations sum correctly",
+      "Check for unexpected NULL values",
+      "Validate care cost calculations",
+      "Compare results across different date ranges for consistency"
+    ]
+  }
+}
