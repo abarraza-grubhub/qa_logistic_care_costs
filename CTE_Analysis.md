@@ -5,6 +5,13 @@ This document provides a detailed, column-level logical analysis of each Common 
 ## Analysis Overview
 The query processes order fulfillment care costs through 11 CTEs that progressively build upon each other. The main data flow is: source data extraction → reason standardization → data integration → cost calculation → final aggregation. Key business logic includes extensive regex-based reason categorization and hierarchical cost attribution.
 
+**CTE Dependency Flow:**
+1. **Data Extraction Layer:** adj, ghg, care_fg, diner_ss_cancels, mdf, contacts (independent source data pulls)
+2. **Integration Layer:** cancels (uses diner_ss_cancels)
+3. **Main Integration:** o (joins all previous CTEs with financial data)
+4. **Transformation Layer:** o2 (reason consolidation), o3 (cost calculation & final groupings)
+5. **Aggregation Layer:** Final SELECT (business metrics rollup)
+
 **Critical Data Quality Patterns Identified:**
 - Extensive use of MAX_BY functions suggests potential duplicate records in source tables
 - Multiple COALESCE and fallback logic patterns indicate missing data handling is a significant concern
@@ -16,6 +23,12 @@ The query processes order fulfillment care costs through 11 CTEs that progressiv
 - Multiple LEFT JOINs in primary integration CTE (o) could benefit from indexing analysis
 - Hardcoded UUID lists in market segmentation create maintenance overhead
 - Extensive CASE statement logic suggests potential for lookup table optimization
+
+**Business Stakeholder Priorities:**
+- Reason standardization logic requires ongoing maintenance as new reason types emerge
+- Market segmentation depends on manual UUID list maintenance
+- Cost attribution hierarchy may need periodic review for business alignment
+- ETA-related metrics definition may impact SLA reporting accuracy
 
 ## CTE: adj
 Purpose: Identifies orders with Grubhub-paid refunds and retrieves the latest adjustment reason and associated contact reason for each order.
@@ -40,7 +53,9 @@ Purpose: Identifies orders that had concessions and retrieves the latest contact
 | Column Name | Source | Derivation Logic | Notes / Questions |
 |-------------|--------|------------------|-------------------|
 | order_uuid | source_cass_rainbow_data.concession_reporting.order_uuid | Direct selection from the source table | None |
-| fg_reason | source_zendesk_ref.secondary_contact_reason.name, source_zendesk_ref.primary_contact_reason.name | Uses MAX_BY with COALESCE to get the contact reason (secondary preferred over primary) corresponding to the latest issue_timestamp_utc | Question: Similar to adj CTE, why is secondary contact reason preferred? Is this a consistent business rule across all contact reason retrievals? |
+| fg_reason | source_zendesk_ref.secondary_contact_reason.name, source_zendesk_ref.primary_contact_reason.name | Uses MAX_BY with COALESCE(sr.name, pr.name) to get the contact reason corresponding to the latest issue_timestamp_utc | Question: This follows the same secondary-over-primary prioritization pattern as other CTEs. Is this a consistent business rule across all care interactions, and are there any scenarios where primary contact reason should take precedence? |
+
+*Note: This CTE focuses specifically on concessions (free grub) and links them to care contact reasons, providing the foundation for fg_reason attribution in downstream analysis.*
 
 ## CTE: diner_ss_cancels
 Purpose: Identifies orders with diner self-service cancellations and maps reason codes to standardized descriptions and groups.
@@ -95,14 +110,16 @@ Purpose: Retrieves comprehensive delivery and operational data for Grubhub-manag
 | cancel_mins | integrated_delivery.managed_delivery_fact_v2.cancelled_time_local, click_start_time_local | DATE_DIFF in minutes between click_start_time_local and cancelled_time_local, only when cancelled | Question: What does click_start_time_local represent? Is this when the customer started the ordering process? |
 
 ## CTE: contacts
-Purpose: Identifies orders with worked care contacts and retrieves the latest contact information.
+Purpose: Identifies orders with worked care contacts and retrieves the latest contact information and total contact counts.
 
 | Column Name | Source | Derivation Logic | Notes / Questions |
 |-------------|--------|------------------|-------------------|
 | order_uuid | integrated_core.ticket_fact.order_uuid | Direct selection from the source table | None |
 | latest_ticket_id | integrated_core.ticket_fact.ticket_id | Uses MAX_BY to get ticket_id corresponding to the latest created_time | None |
-| latest_contact_reason | source_zendesk_ref.secondary_contact_reason.name, source_zendesk_ref.primary_contact_reason.name | Uses MAX_BY with COALESCE to get contact reason corresponding to latest created_time | Consistent with pattern in other CTEs |
-| contacts | integrated_core.ticket_fact.ticket_id | COUNT of ticket_id records | Represents total number of care contacts for the order |
+| latest_contact_reason | source_zendesk_ref.secondary_contact_reason.name, source_zendesk_ref.primary_contact_reason.name | Uses MAX_BY with COALESCE(sr.name, pr.name) to get contact reason corresponding to latest created_time | Consistent with pattern in other CTEs - secondary reason prioritized |
+| contacts | integrated_core.ticket_fact.ticket_id | COUNT of ticket_id records for each order_uuid | Represents total number of care contacts for the order |
+
+*Note: This CTE specifically filters for cpo_contact_indicator = 1, focusing only on "worked" contacts where care agents were involved, excluding automated contacts that don't have associated ticket costs.*
 
 ## CTE: o
 Purpose: Integrates operational and financial data, standardizes issue reasons, and calculates specific costs for comprehensive order analysis.
@@ -150,6 +167,8 @@ Purpose: Integrates operational and financial data, standardizes issue reasons, 
 | cp_redelivery_cost | integrated_order.order_contribution_profit_fact.cp_redelivery_cost | Direct selection from the source table | None |
 | cp_care_ticket_cost | integrated_order.order_contribution_profit_fact (multiple ticket cost fields) | Sum of cp_diner_care_tickets + cp_driver_care_tickets + cp_restaurant_care_tickets + cp_gh_internal_care_tickets | None |
 
+*Note: This CTE consolidates order-level data from multiple sources and applies critical business logic including GHD filtering (managed_delivery_ind = TRUE), extensive reason standardization via regex patterns, and cost component derivation. It serves as the foundation for all downstream cost calculations and represents the most complex transformation step in the query.*
+
 ## CTE: o2
 Purpose: Creates a consolidated reason field by prioritizing cancellation reasons over adjustment reasons.
 
@@ -170,7 +189,7 @@ Purpose: Calculates total care cost and derives final analytical reason groups f
 | fg_group | o2.cancel_group, integrated_ref.cancellation_reason_map.cancel_group, o2.fg_reason | Identical CASE logic as adjustment_group but applied to fg_reason instead of adjustment_and_cancel_reason_combined | Question: The exact same categorization logic is duplicated here. This suggests these rules are business-critical - should they be centralized to ensure consistency across all reason categorizations? |
 | fg_reason | o2.cp_care_concession_awarded_amount, o2.fg_reason, o2.adjustment_and_cancel_reason_combined | CASE statement: when cp_care_concession_awarded_amount < 0 AND fg_reason IS NULL then adjustment_and_cancel_reason_combined; else fg_reason | Question: What business scenario does a negative concession amount represent? Is this a refund that should be linked to the primary order issue reason, and why only when fg_reason is specifically NULL? |
 
-*Note: Most other columns from the o2 CTE are passed through directly*
+*Note: This CTE performs the final cost calculation with the primary business metric (total_care_cost) and applies the ultimate reason categorization logic. The results from this CTE directly feed into the final aggregation layer, making it critical for ensuring accurate cost attribution and reason grouping.*
 
 ## Final SELECT
 Purpose: Aggregates order-level data into summarized metrics grouped by key analytical dimensions.
@@ -186,3 +205,25 @@ Purpose: Aggregates order-level data into summarized metrics grouped by key anal
 | ghd_orders | o3.ghd_ind | SUM with IF condition counting records where ghd_ind = 'ghd' | Count of Grubhub-delivered orders |
 | orders_with_care_cost | o3.cp_diner_adj, o3.cp_care_concession_awarded_amount, o3.cp_care_ticket_cost | SUM with IF condition counting records where (cp_diner_adj + cp_care_concession_awarded_amount + cp_care_ticket_cost) < 0 | Question: This metric excludes cp_redelivery_cost and cp_grub_care_refund from the total_care_cost calculation used elsewhere in the query. What is the business rationale for using a subset of cost components here? Are redelivery and refund costs not considered "care costs" for this particular metric? |
 | cancels_osmf_definition | o3.order_status_cancel_ind, o3.order_uuid | COUNT with CASE condition counting records where order_status_cancel_ind = TRUE | Question: The "osmf_definition" suffix is unclear - does this refer to a specific system or methodology? How does this cancellation count differ from other cancellation indicators used throughout the query (cancel_ind, cancel_fact_ind), and when should each be used? |
+
+## Summary of Key Findings and Recommendations
+
+**Immediate Business Attention Required:**
+1. **Reason Standardization Maintenance:** The extensive regex pattern logic in CTEs o and o3 requires centralized management to prevent inconsistencies as new reason types emerge
+2. **Market Segmentation Brittleness:** Hardcoded UUID lists for NYC_Market need migration to reference table approach
+3. **Data Quality Monitoring:** Multiple MAX_BY functions suggest potential duplicate records in source systems requiring investigation
+
+**Business Logic Clarifications Needed:**
+1. **Secondary vs Primary Contact Reason Prioritization:** Consistent pattern across CTEs but business rationale unclear
+2. **ETA-Related Metrics Definition:** Expanded lateness definition including post-ETA cancellations needs SLA alignment review
+3. **Cost Component Variations:** Different cost component combinations used in various metrics need business justification
+
+**Technical Optimization Opportunities:**
+1. **Performance:** Complex regex matching and multiple joins may benefit from indexing analysis
+2. **Maintainability:** Lookup tables could replace CASE statement logic for reason categorization
+3. **Consistency:** Duplicate logic patterns should be consolidated into shared functions or reference tables
+
+**Data Completeness Considerations:**
+- Extensive COALESCE and fallback logic indicates significant missing data patterns
+- Impact of NULL handling choices on business metrics needs validation
+- Cross-CTE data flow dependencies require monitoring for data quality issues
