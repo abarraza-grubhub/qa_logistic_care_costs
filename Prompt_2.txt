@@ -1,0 +1,64 @@
+Overarching task: We want to answer: Verify that the most efficient data type is selected. Have we applied the right filters?
+All the tasks below are to be done in the context of answering the above question.
+
+Task:
+Create a branch, and in the branch add a commit with two files:
+1. A Markdown file named "Optimization_Validation_Analysis.md" containing your analysis of data
+2. A Python script named "data_profiling_script.py" that uses pandas to generate code for validating your hypotheses.
+ type efficiency and filter application.
+
+Context and more instructions:
+
+You are an expert Data Engineer specializing in SQL performance tuning and data validation.
+Your task is to analyze the provided SQL query in "fulfillment_care_cost.sql"
+and its context document "Breaking Down Logistic Care Costs Query.md" to identify potential optimizations.
+
+You will produce two separate deliverables:
+
+A Markdown analysis document that evaluates data type efficiency and filter application.
+
+A Python script that uses the pandas library to generate code for validating your hypotheses.
+
+Your analysis must be based only on the provided "fulfillment_care_cost.sql" and "Breaking Down Logistic Care Costs Query.md" .
+ Do not use any external information or assumptions.
+
+
+Guiding Principles
+Acknowledge Limitations: Clearly state that you do not have access to the database's execution plans or data statistics. Your recommendations are inferences based on the query structure and provided context.
+
+Hypothesize and Validate: Frame your analysis as a series of hypotheses (e.g., "This VARCHAR column could likely be an INTEGER") and then generate the Python code needed to prove or disprove them.
+
+Actionable & Justified: Every suggestion must be paired with a clear and concise rationale, and the corresponding Python code must directly test that rationale.
+
+
+Deliverable 1: Optimization & Validation Analysis (Markdown)
+Begin your analysis now. Structure your response with the following sections.
+
+Analysis Summary
+A brief, high-level overview of the key findings and most critical questions for validation.
+
+Section 1: Data Type Efficiency
+Based on column names, context, and common conventions, analyze if the most efficient data types are likely being used. Present your findings in the table below.
+
+CTE Name	Column Name	Inferred Data Type	Suggested Data Type	Justification & Analysis	Required Validation Code (in Python script)
+[cte_name]	[column_name]	VARCHAR	INTEGER	The column is named customer_id and is used in a join, suggesting it's a numeric key. Using INTEGER is more efficient for joins and storage.	Check if all values in the column are numeric and fit within the integer range.
+[cte_name]	[column_name]	TEXT	VARCHAR(20)	The column status_code appears to have a fixed set of short values. TEXT can be inefficient; a VARCHAR with a defined length is better.	Determine the unique values and maximum length of this column.
+[cte_name]	[column_name]	FLOAT	DECIMAL(10, 2)	This column order_total represents currency. FLOAT can cause precision errors; DECIMAL is the correct type for financial data.	Check if values have more than 2 decimal places.
+
+Section 2: Filter Application (Correctness & Efficiency)
+Analyze all WHERE, HAVING, and JOIN ON clauses in the query.
+
+Filter Correctness: Based on the context document, are the filters correctly implementing the described business logic? Highlight any discrepancies or ambiguities.
+
+Filter Efficiency (Pushdown): Could any filters be applied earlier in the query? Identify filters in later CTEs that operate on columns available in earlier CTEs. Explain why moving the filter "up" would be more efficient.
+
+Deliverable 2: Data Profiling Script (Python)
+Next, generate a single Python code block for the validation script.
+
+Crucially, your script must assume that a dictionary named cte_dfs has already been populated and is available in the environment.
+The keys of this dictionary are the CTE names (e.g., 'cte_name_1'), and the values are the corresponding pandas DataFrames, the final output key is "final_output" key.
+ The code should leverage pandas to create any code necessary that when generated would help us clarify any questions that would make us be more accurate in addressing the question at hand.
+
+Your generated code must not contain any logic for connecting to databases, reading files, or otherwise constructing this cte_dfs
+ dictionary.
+ The script's only job is to use the existing dictionary to perform the validation checks identified in your Markdown analysis.

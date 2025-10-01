@@ -1,0 +1,10 @@
+Make a python script to help answer:
+
+Ensure that large tables are specified first in a JOIN clause
+
+*Task* Create a branch and add a commit with the python script that will help answer the above question.
+
+*Sources*
+Query: "fulfillment_care_cost.sql" file in this repo
+More context of the query: "Breaking Down Logistic Care Costs Query.md" file in this repo.
+Do not use any external information or assumptions.
