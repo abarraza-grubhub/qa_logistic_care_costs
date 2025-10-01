@@ -7,12 +7,24 @@ This script analyzes the fulfillment_care_cost.sql query to help answer:
 
 It parses the SQL query, identifies all JOIN operations, and provides recommendations
 for optimizing JOIN order based on table size heuristics and query patterns.
+
+Usage:
+    python analyze_join_order.py [options]
+    
+Options:
+    --format {text|csv|json}  Output format (default: text)
+    --output FILE             Output file (default: stdout for text, auto-generated for others)
+    --show-conditions         Include full JOIN conditions in output
+    --verbose                 Show verbose analysis details
 """
 
 import re
 import sys
+import json
+import csv
+import argparse
 from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
 
@@ -35,12 +47,13 @@ class TableInfo:
     size_category: str  # 'large', 'medium', 'small', 'unknown'
     is_cte: bool = False
     description: str = ""
+    estimated_rows: str = "Unknown"  # e.g., "10M+", "1M-10M", "<1M"
 
 
 class SQLJoinAnalyzer:
     """Analyzes SQL queries for JOIN order optimization opportunities."""
     
-    def __init__(self, sql_file_path: str, context_file_path: str):
+    def __init__(self, sql_file_path: str, context_file_path: str, options: Optional[Dict] = None):
         self.sql_file_path = sql_file_path
         self.context_file_path = context_file_path
         self.joins: List[JoinClause] = []
@@ -48,6 +61,7 @@ class SQLJoinAnalyzer:
         self.sql_content = ""
         self.context_content = ""
         self.table_context_info = {}  # Store information from context document
+        self.options = options or {}
         
     def load_files(self) -> None:
         """Load SQL and context files."""
@@ -345,13 +359,46 @@ class SQLJoinAnalyzer:
         if table_name not in self.tables:
             size_category = self.categorize_table_size(full_reference)
             is_cte = not ('.' in full_reference)  # CTEs typically don't have schema prefixes
+            estimated_rows = self._estimate_table_rows(table_name, size_category)
             
             self.tables[table_name] = TableInfo(
                 name=table_name,
                 full_name=full_reference,
                 size_category=size_category,
-                is_cte=is_cte
+                is_cte=is_cte,
+                estimated_rows=estimated_rows
             )
+    
+    def _estimate_table_rows(self, table_name: str, size_category: str) -> str:
+        """Estimate table row counts based on size category and naming patterns."""
+        table_lower = table_name.lower()
+        
+        # Specific estimates based on table patterns
+        if 'order_contribution_profit_fact' in table_lower:
+            return "100M+"
+        elif 'managed_delivery_fact' in table_lower:
+            return "50M+"
+        elif 'ticket_fact' in table_lower:
+            return "10M+"
+        elif 'adjustment_reporting' in table_lower or 'concession_reporting' in table_lower:
+            return "5M+"
+        elif 'cancellation' in table_lower and 'fact' in table_lower:
+            return "1M+"
+        elif 'primary_contact_reason' in table_lower or 'secondary_contact_reason' in table_lower:
+            return "<1K"
+        elif 'care_cost_reasons' in table_lower:
+            return "<100"
+        
+        # General estimates based on size category
+        size_to_rows = {
+            'large': "1M+",
+            'medium': "100K-1M",
+            'small': "<100K",
+            'derived': "Variable",
+            'unknown': "Unknown"
+        }
+        
+        return size_to_rows.get(size_category, "Unknown")
     
     def analyze_join_order(self) -> List[Dict]:
         """Analyze JOIN order and identify optimization opportunities."""
@@ -421,10 +468,74 @@ class SQLJoinAnalyzer:
         
         return recommendations
     
+    def export_to_csv(self, recommendations: List[Dict], filename: str) -> None:
+        """Export analysis results to CSV format."""
+        if not recommendations:
+            print("No data to export")
+            return
+            
+        fieldnames = [
+            'cte_name', 'line_number', 'join_type', 'left_table', 'right_table',
+            'left_size', 'right_size', 'left_estimated_rows', 'right_estimated_rows',
+            'current_order', 'join_condition', 'issue', 'suggested_order', 'priority', 'performance_impact'
+        ]
+        
+        with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            
+            for rec in recommendations:
+                # Add estimated rows information
+                left_table_info = self.tables.get(rec['left_table'])
+                right_table_info = self.tables.get(rec['right_table'])
+                
+                rec['left_estimated_rows'] = left_table_info.estimated_rows if left_table_info else 'Unknown'
+                rec['right_estimated_rows'] = right_table_info.estimated_rows if right_table_info else 'Unknown'
+                
+                # Clean join condition for CSV
+                if len(rec['join_condition']) > 100:
+                    rec['join_condition'] = rec['join_condition'][:97] + "..."
+                
+                writer.writerow({k: rec.get(k, '') for k in fieldnames})
+        
+        print(f"CSV export saved to: {filename}")
+    
+    def export_to_json(self, recommendations: List[Dict], filename: str) -> None:
+        """Export analysis results to JSON format."""
+        # Prepare comprehensive data structure
+        export_data = {
+            'metadata': {
+                'total_joins': len(self.joins),
+                'total_tables': len(self.tables),
+                'analysis_timestamp': __import__('datetime').datetime.now().isoformat(),
+                'source_files': {
+                    'sql_file': self.sql_file_path,
+                    'context_file': self.context_file_path
+                }
+            },
+            'table_catalog': {
+                name: asdict(info) for name, info in self.tables.items()
+            },
+            'join_analysis': recommendations,
+            'summary': {
+                'critical_issues': sum(1 for r in recommendations if r['priority'] == 'critical'),
+                'high_priority': sum(1 for r in recommendations if r['priority'] == 'high'),
+                'medium_priority': sum(1 for r in recommendations if r['priority'] == 'medium'),
+                'info_notes': sum(1 for r in recommendations if r['priority'] == 'info')
+            }
+        }
+        
+        with open(filename, 'w', encoding='utf-8') as jsonfile:
+            json.dump(export_data, jsonfile, indent=2, ensure_ascii=False)
+        
+        print(f"JSON export saved to: {filename}")
+    
     def generate_report(self) -> str:
         """Generate a comprehensive analysis report."""
-        self.load_files()
-        self.parse_joins()
+        if not hasattr(self, 'joins') or not self.joins:
+            self.load_files()
+            self.parse_joins()
+        
         recommendations = self.analyze_join_order()
         
         report = []
@@ -456,7 +567,8 @@ class SQLJoinAnalyzer:
                 report.append(f"### {size.title()} Tables:")
                 for table in sorted(tables_in_category, key=lambda x: x.name):
                     cte_indicator = " (CTE)" if table.is_cte else ""
-                    report.append(f"- {table.name}{cte_indicator}")
+                    rows_info = f" - Est. rows: {table.estimated_rows}" if self.options.get('verbose') else ""
+                    report.append(f"- {table.name}{cte_indicator}{rows_info}")
                 report.append("")
         
         # JOIN analysis
@@ -471,9 +583,25 @@ class SQLJoinAnalyzer:
                 report.append("")
             
             report.append(f"**Line {rec['line_number']}:** `{rec['current_order']}`")
+            
+            # Basic information
+            left_table_info = self.tables.get(rec['left_table'])
+            right_table_info = self.tables.get(rec['right_table'])
+            
             report.append(f"- Left table size: {rec['left_size']}")
+            if left_table_info and self.options.get('verbose'):
+                report.append(f"  - Estimated rows: {left_table_info.estimated_rows}")
+            
             report.append(f"- Right table size: {rec['right_size']}")
-            report.append(f"- Join condition: `{rec['join_condition']}`")
+            if right_table_info and self.options.get('verbose'):
+                report.append(f"  - Estimated rows: {right_table_info.estimated_rows}")
+            
+            # JOIN condition - show full or truncated based on options
+            if self.options.get('show_conditions') or len(rec['join_condition']) <= 60:
+                report.append(f"- Join condition: `{rec['join_condition']}`")
+            else:
+                report.append(f"- Join condition: `{rec['join_condition'][:57]}...`")
+            
             report.append(f"- Performance impact: {rec['performance_impact']}")
             
             if rec['issue']:
@@ -538,6 +666,44 @@ class SQLJoinAnalyzer:
 
 def main():
     """Main function to run the JOIN analysis."""
+    parser = argparse.ArgumentParser(
+        description="Analyze SQL JOIN order for optimization opportunities",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+    python analyze_join_order.py
+    python analyze_join_order.py --format csv --output joins.csv
+    python analyze_join_order.py --format json --verbose
+    python analyze_join_order.py --show-conditions --verbose
+        """
+    )
+    
+    parser.add_argument(
+        '--format',
+        choices=['text', 'csv', 'json'],
+        default='text',
+        help='Output format (default: text)'
+    )
+    
+    parser.add_argument(
+        '--output',
+        help='Output file (default: auto-generated for csv/json, stdout for text)'
+    )
+    
+    parser.add_argument(
+        '--show-conditions',
+        action='store_true',
+        help='Include full JOIN conditions in output'
+    )
+    
+    parser.add_argument(
+        '--verbose',
+        action='store_true',
+        help='Show verbose analysis details including row estimates'
+    )
+    
+    args = parser.parse_args()
+    
     # File paths
     sql_file = "fulfillment_care_cost.sql"
     context_file = "Breaking Down Logistic Care Costs Query.md"
@@ -550,21 +716,38 @@ def main():
     if not Path(context_file).exists():
         print(f"Warning: Context file '{context_file}' not found in current directory")
     
+    # Set up options
+    options = {
+        'show_conditions': args.show_conditions,
+        'verbose': args.verbose
+    }
+    
     # Run analysis
-    analyzer = SQLJoinAnalyzer(sql_file, context_file)
+    analyzer = SQLJoinAnalyzer(sql_file, context_file, options)
     
     try:
-        report = analyzer.generate_report()
+        analyzer.load_files()
+        analyzer.parse_joins()
+        recommendations = analyzer.analyze_join_order()
         
-        # Output report
-        print(report)
+        # Generate output based on format
+        if args.format == 'text':
+            report = analyzer.generate_report()
+            
+            if args.output:
+                with open(args.output, 'w', encoding='utf-8') as f:
+                    f.write(report)
+                print(f"Report saved to: {args.output}")
+            else:
+                print(report)
         
-        # Also save to file
-        output_file = "join_order_analysis_report.md"
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write(report)
+        elif args.format == 'csv':
+            output_file = args.output or "join_analysis.csv"
+            analyzer.export_to_csv(recommendations, output_file)
         
-        print(f"\n\nReport saved to: {output_file}")
+        elif args.format == 'json':
+            output_file = args.output or "join_analysis.json"
+            analyzer.export_to_json(recommendations, output_file)
         
     except Exception as e:
         print(f"Error during analysis: {e}")
