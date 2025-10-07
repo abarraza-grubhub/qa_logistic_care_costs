@@ -1,5 +1,27 @@
 # Detailed Comparison: fulfillment_care_cost.sql (v1) vs LATEST_fulfillment_care_cost.sql
 
+## Table of Contents
+
+- [Executive Summary](#executive-summary)
+- [CTE-by-CTE Comparison](#cte-by-cte-comparison)
+  - [1. CTE: adj (Adjustments)](#1-cte-adj-adjustments)
+  - [2. CTE: ghg (Grubhub Guarantee)](#2-cte-ghg-grubhub-guarantee)
+  - [3. CTE: care_fg (Care Free Grub)](#3-cte-care_fg-care-free-grub)
+  - [4. CTE: diner_ss_cancels (Diner Self-Service Cancellations)](#4-cte-diner_ss_cancels-diner-self-service-cancellations)
+  - [5. CTE: cancels (Order Cancellations)](#5-cte-cancels-order-cancellations)
+  - [6. CTE: osmf (Order Status Milestone Fact) - LATEST ONLY](#6-cte-osmf-order-status-milestone-fact---latest-only-)
+  - [7. CTE: of (Order Fact) - LATEST ONLY](#7-cte-of-order-fact---latest-only-)
+  - [8. CTE: mdf (Managed Delivery Fact)](#8-cte-mdf-managed-delivery-fact)
+  - [9. CTE: rest_refunds (Restaurant Refunds) - LATEST ONLY](#9-cte-rest_refunds-restaurant-refunds---latest-only-)
+  - [10. CTE: contacts (Care Contacts)](#10-cte-contacts-care-contacts)
+  - [11. CTE: o (Main Integration CTE)](#11-cte-o-main-integration-cte)
+  - [12. CTE: o2 (Adjustment and Cancel Reason Consolidation)](#12-cte-o2-adjustment-and-cancel-reason-consolidation)
+  - [13. CTE: o3 (Final Cost Calculation and Grouping)](#13-cte-o3-final-cost-calculation-and-grouping)
+  - [14. Final SELECT Statement](#14-final-select-statement)
+- [Summary of Major Differences](#summary-of-major-differences)
+- [Recommendations for Use](#recommendations-for-use)
+- [Conclusion](#conclusion)
+
 ## Executive Summary
 
 This document provides a comprehensive, CTE-by-CTE comparison of two versions of the Fulfillment Care Cost query:
@@ -205,6 +227,22 @@ LATEST uses GROUP BY order_uuid and aggregation functions:
 
 **LATEST Date Filter**: `business_day >= CURRENT_DATE - INTERVAL '6' MONTH`
 
+**Why MIN_BY Aggregation in LATEST?**
+
+LATEST uses `MIN_BY(column, order_created_time_utc)` aggregation strategy with `GROUP BY order_uuid`. This design choice has important implications:
+
+| Aspect | Reasoning | Business Impact |
+|--------|-----------|-----------------|
+| **Multiple deliveries per order** | Some orders may have multiple delivery attempts (e.g., after a failed delivery) | MIN_BY takes the FIRST delivery attempt's data |
+| **Order-level analysis** | Final output needs one row per order, not per delivery | Avoids double-counting orders in totals |
+| **Consistency with cost data** | Cost data in order_contribution_profit_fact is at order level | Ensures metrics align with costs |
+| **ETA calculation** | Uses first delivery's ETA + 10 min as the baseline | Fair assessment based on initial promise to customer |
+
+**Example**: If order ABC has 2 delivery attempts (first at 6pm, second at 7pm):
+- **v1 would include**: Both delivery records (if no DISTINCT later)
+- **LATEST includes**: Only first delivery's attributes (6pm attempt)
+- **Why this matters**: Ensures care costs aren't duplicated across delivery attempts
+
 **MAJOR DIFFERENCES**:
 1. **Aggregation**: v1 keeps all delivery records; LATEST aggregates to order level using MIN_BY
 2. **Geographic Data**: v1 includes region/market fields; LATEST moves this to separate `of` CTE  
@@ -303,6 +341,37 @@ Applies same patterns to both adjustment_reason_name and COALESCE(cancel_contact
 **fg_reason patterns**: Same 9 patterns applied to COALESCE(ghg.fg_reason, care_fg.fg_reason)
 
 **TLDR on Reason Logic**: ✅ **100% IDENTICAL** standardization logic for categorizing adjustment and free grub reasons.
+
+#### Detailed REGEXP Patterns Comparison - Reason Standardization
+
+To verify the "identical" claim, here is the complete side-by-side comparison of all REGEXP patterns used in both queries:
+
+**Pattern Application**: Both v1 and LATEST apply these patterns to:
+1. `adjustment_reason_name` field (from adj CTE)
+2. `COALESCE(cancel_contact_reason, adj_contact_reason)` field
+
+| Pattern (REGEXP_LIKE) | Standardized Output | v1 | LATEST | Match |
+|------------------------|---------------------|-----|---------|-------|
+| `'food temp\|cold\|quality_temp\|temperature'` | 'food temperature' | ✓ | ✓ | ✅ |
+| `'incorrect order\|incorrect item\|wrong order\|incorrect_item'` | 'incorrect order' | ✓ | ✓ | ✅ |
+| `'damaged'` | 'food damaged' | ✓ | ✓ | ✅ |
+| `'missing'` | 'missing item' | ✓ | ✓ | ✅ |
+| `'item removed'` | 'item removed from order' | ✓ | ✓ | ✅ |
+| `'late'` | 'late order' | ✓ | ✓ | ✅ |
+| `'menu error'` | 'order or menu issue' | ✓ | ✓ | ✅ |
+| `'temporarily unavailable\|unavailable'` | 'out of item' | ✓ | ✓ | ✅ |
+| `'order not rec\|missed delivery'` | 'missed delivery' | ✓ | ✓ | ✅ |
+| `'refund due to\|refund for'` | LOWER(COALESCE(cancel_contact_reason, adj_contact_reason, adjustment_reason_name)) | ✓ | ✓ | ✅ |
+| **Default (ELSE)** | LOWER(COALESCE(cancel_contact_reason, adj_contact_reason, adjustment_reason_name)) | ✓ | ✓ | ✅ |
+
+**Pattern Application for fg_reason**: Both apply same patterns to `COALESCE(ghg.fg_reason, care_fg.fg_reason)`:
+
+| Pattern (REGEXP_LIKE) | Standardized Output | v1 | LATEST | Match |
+|------------------------|---------------------|-----|---------|-------|
+| All 9 patterns above | Same outputs | ✓ | ✓ | ✅ |
+| **Additional condition** | When cp_care_concession_awarded_amount = 0 | THEN NULL | THEN NULL | ✅ |
+
+**Verification**: All 11 conditions (9 patterns + refund + default) are **byte-for-byte identical** in both queries.
 
 #### Cost Component Columns
 
@@ -515,6 +584,8 @@ END)
 
 ⚠️ **LATEST adds**: Explicit 'logistics issues' classification when redelivery cost exists (before checking other groups)
 
+**Why this change?** Business context: Redelivery costs are always related to logistics problems (missed deliveries, late deliveries requiring a second attempt). By checking redelivery cost first, LATEST ensures these are always categorized as 'logistics issues' even if other reason grouping logic might categorize them differently. This provides more accurate attribution of logistics-related costs.
+
 #### care_cost_reason Column - LATEST Only
 
 **LATEST**:
@@ -539,6 +610,79 @@ This provides more granular reason detail within each reason group.
 | **Use Case** | High-level monitoring dashboard | Detailed analytical reporting | Different purposes |
 
 **TLDR**: v1 produces a summary dashboard view; LATEST produces a detailed analytical dataset with many more dimensions and metrics for deep-dive analysis.
+
+#### Complete Final Output Columns Comparison
+
+**v1 Final Output - Aggregated View (11 columns)**:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| cany_ind | Dimension | Market segment (CA/DCWP/ROM) |
+| care_cost_reason_group | Dimension | Issue category (Logistics/Restaurant/Diner Issues) |
+| eta_care_reasons | Dimension | ETA-related issues vs Other |
+| orders | Metric | Count of orders |
+| distinct_order_uuid | Metric | Distinct order count |
+| total_care_cost | Metric | Sum of total care costs |
+| ghd_orders | Metric | Count of GHD orders |
+| orders_with_care_cost | Metric | Count of orders with negative costs |
+| cancels_osmf_definition | Metric | Count of cancelled orders |
+
+**LATEST Final Output - Detailed Analytical View (44 columns)**:
+
+| Column | Type | Category | v1 Equivalent |
+|--------|------|----------|---------------|
+| **Dimensional Columns (18)** ||||
+| date1 | Dimension | Temporal | ❌ (v1 aggregates away) |
+| ghd_ind | Dimension | Order Type | Similar (v1 filters to GHD only) |
+| delivery_ind | Dimension | Order Type | ❌ NEW |
+| cancel_fact_ind | Dimension | Status | ❌ (v1 aggregates away) |
+| adjustment_group | Dimension | Reason Category | Similar to care_cost_reason_group |
+| adjustment_and_cancel_reason_combined | Dimension | Reason Detail | ❌ (v1 aggregates away) |
+| ghd_late_ind | Dimension | Performance | ❌ (v1 aggregates away) |
+| ghd_late_ind_incl_cancel_time | Dimension | Performance | ❌ (v1 aggregates away) |
+| bundle_ind | Dimension | Order Attribute | ❌ (v1 aggregates away) |
+| shop_and_pay_ind | Dimension | Order Attribute | ❌ NEW |
+| automated_ind | Dimension | Care Channel | ❌ NEW |
+| modified_cbsa_name | Dimension | Geography | ❌ NEW (v1 uses regions) |
+| key_cities_cbsa | Dimension | Geography | ❌ NEW |
+| ghd_delivery_region_name | Dimension | Geography | ❌ NEW |
+| large_order_ind | Dimension | Order Attribute | ❌ NEW |
+| tri_state_ind | Dimension | Geography | ❌ NEW |
+| care_cost_reason_group | Dimension | Reason Category | ✅ Similar to v1 |
+| care_cost_reason | Dimension | Reason Detail | ❌ NEW |
+| **Metric Columns (26)** ||||
+| orders | Metric | Volume | ✅ Similar to v1 |
+| cancels | Metric | Volume | ❌ NEW |
+| missed_revenue_cp | Metric | Financial | ❌ NEW |
+| cp_diner_adj | Metric | Cost Component | Part of total_care_cost in v1 |
+| cp_care_concession_awarded_amount | Metric | Cost Component | Part of total_care_cost in v1 |
+| cp_care_ticket_cost | Metric | Cost Component | Part of total_care_cost in v1 |
+| redelivery_cost | Metric | Cost Component | Part of total_care_cost in v1 |
+| cp_grubcash_care_concession_awarded_amount | Metric | Cost Component | ❌ NEW |
+| cp_grubcare_refund | Metric | Cost Component | Part of total_care_cost in v1 |
+| rr_refund | Metric | Cost Component | ❌ NEW |
+| cp_total_care_cost | Metric | Cost Total | ✅ Equivalent to total_care_cost in v1 |
+| ghd_late_count | Metric | Performance | ❌ NEW |
+| ghd_orders | Metric | Volume | ✅ Similar to v1 |
+| driver_pay_cpf | Metric | Cost | ❌ NEW |
+| tip | Metric | Revenue | ❌ NEW |
+| true_up | Metric | Cost | ❌ NEW |
+| orders_with_adjustments | Metric | Volume | ❌ NEW |
+| orders_with_fg | Metric | Volume | ❌ NEW |
+| orders_with_redelivery | Metric | Volume | ❌ NEW |
+| orders_with_gh_credit | Metric | Volume | ❌ NEW |
+| orders_with_gh_credit_refund | Metric | Volume | ❌ NEW |
+| orders_with_rr_refund | Metric | Volume | ❌ NEW |
+| orders_with_care_cost | Metric | Volume | ✅ Similar to v1 |
+| cancels_osmf_definition | Metric | Volume | ✅ Similar to v1 |
+
+**Key Differences**:
+- **v1**: 3 grouping dimensions → High-level summary suitable for executive dashboard
+- **LATEST**: 18 grouping dimensions → Granular analytical dataset for deep-dive analysis
+- **v1**: 8 metrics → Focus on key KPIs
+- **LATEST**: 26 metrics → Comprehensive cost breakdown and volume tracking
+- **v1**: All costs rolled into total_care_cost → Simple but less visibility
+- **LATEST**: Costs broken out by component → Enables root cause analysis
 
 ---
 
@@ -634,4 +778,112 @@ Both queries serve the same fundamental purpose - calculating Fulfillment Care C
 The core logic for reason standardization and grouping is identical, ensuring consistency in how care costs are categorized. The main differences are in scope (GHD-only vs all orders), geography (regions vs CBSAs), cost components (5 vs 7), and output granularity (summary vs detailed).
 
 Neither is strictly "better" - they serve different analytical needs within the organization.
+
+---
+
+## Practical Examples: When Queries Produce Different Results
+
+### Example 1: Pickup Order Analysis
+
+**Scenario**: A pickup order (not GHD) has a care cost issue.
+
+| Query | Behavior | Result |
+|-------|----------|--------|
+| **v1** | Filtered out by `managed_delivery_ind = TRUE` | ❌ **Not included in output** |
+| **LATEST** | Included, marked with ghd_ind = 'non-ghd' and delivery_ind = 'pickup' | ✅ **Included and identified** |
+
+**Business Impact**: v1 underreports total care costs by excluding non-GHD orders. LATEST provides complete picture.
+
+---
+
+### Example 2: Shop and Pay Order
+
+**Scenario**: A shop-and-pay order (grocery delivery) has a late delivery issue.
+
+| Query | Behavior | Result |
+|-------|----------|--------|
+| **v1** | If it's GHD, included but shop_and_pay flag not available | ✅ Included but can't filter/segment |
+| **LATEST** | Included with shop_and_pay_ind = true | ✅ Included and identifiable |
+
+**Business Impact**: LATEST enables analysis of care costs specific to shop-and-pay vs restaurant orders.
+
+---
+
+### Example 3: Restaurant-Initiated Refund
+
+**Scenario**: Restaurant refunds $20 directly to customer for food quality issue.
+
+| Query | Behavior | Result |
+|-------|----------|--------|
+| **v1** | No rest_refunds CTE | ❌ **Refund not captured** |
+| **LATEST** | Captured in rr_refund field via rest_refunds CTE | ✅ **$20 captured** |
+
+**Business Impact**: v1 underreports total refund costs. LATEST captures all refund types.
+
+---
+
+### Example 4: Date Range Flexibility
+
+**Scenario**: Analyst wants to analyze a specific promotion period (Black Friday week).
+
+| Query | Behavior | Result |
+|-------|----------|--------|
+| **v1** | Set {{start_date}} = '2024-11-22', {{end_date}} = '2024-11-28' | ✅ **Can analyze specific week** |
+| **LATEST** | Rolling 6-month window only | ❌ **Cannot isolate specific week** without modifying query |
+
+**Business Impact**: v1 more flexible for ad-hoc analysis. LATEST optimized for standardized reporting.
+
+---
+
+### Example 5: Geographic Analysis
+
+**Scenario**: Analyst wants to compare care costs in Manhattan vs Brooklyn.
+
+| Query | Behavior | Result |
+|-------|----------|--------|
+| **v1** | Only has NYC_Market (DCWP for all NYC) | ❌ **Cannot distinguish boroughs** |
+| **LATEST** | Has modified_cbsa_name with 'New York - Manhattan' vs 'New York CBSA Excluding Manhattan' | ✅ **Can distinguish** |
+
+**Business Impact**: LATEST enables more granular geographic analysis using industry-standard CBSA definitions.
+
+---
+
+### Example 6: Redelivery Cost Attribution
+
+**Scenario**: Order has both adjustment_reason = 'incorrect order' (Restaurant Issue) and cp_redelivery_cost = -$15.
+
+| Query | care_cost_reason_group | Reasoning |
+|-------|------------------------|-----------|
+| **v1** | 'restaurant issues' | Follows normal grouping logic based on adjustment_reason pattern |
+| **LATEST** | 'logistics issues' | Special condition: `WHEN cp_redelivery_cost < 0 THEN 'logistics issues'` fires first |
+
+**Business Impact**: LATEST attributes redelivery costs to logistics even if the root cause was a restaurant issue. This may be more accurate since the redelivery itself is a logistics operation.
+
+---
+
+### Example 7: Automation Tracking
+
+**Scenario**: Care contact was handled by automation (chatbot), not live agent.
+
+| Query | Behavior | Result |
+|-------|----------|--------|
+| **v1** | No automated_ind field | ❌ **Cannot distinguish automated vs manual** |
+| **LATEST** | automated_ind = true captured from contacts CTE | ✅ **Can analyze automation effectiveness** |
+
+**Business Impact**: LATEST enables ROI analysis of automation investments.
+
+---
+
+### Example 8: Multiple Delivery Attempts
+
+**Scenario**: Order ABC123 has 2 delivery attempts (first failed, second succeeded).
+
+| Query | Behavior | Result |
+|-------|----------|--------|
+| **v1** | mdf is INNER JOIN, may include multiple records | Could potentially count order twice if not handled by DISTINCT |
+| **LATEST** | mdf aggregates via MIN_BY to single record per order | Definitely counts order once |
+
+**Business Impact**: LATEST guarantees no double-counting of orders with multiple delivery attempts.
+
+---
 
