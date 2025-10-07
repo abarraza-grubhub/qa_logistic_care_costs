@@ -72,8 +72,10 @@ The following table provides a brief summary of each CTE in the order of its app
 | mdf | Retrieves simplified delivery metrics for Grubhub-managed deliveries, focusing on the earliest order creation time for multi-delivery scenarios. It calculates key estimated times of arrival (ETAs), delivery completion times, and derives the primary delivery lateness indicator (ghd\_late\_ind). Also identifies bundle orders and shop-and-pay orders. This CTE is more streamlined compared to the original query's mdf CTE. |
 | rest\_refunds | Calculates the total restaurant refunds (rr\_refund\_total) for each order by summing PCI single refund transactions. This represents refunds processed through the restaurant payment system. |
 | contacts | Identifies orders that had a "worked" care contact (non-automated, cpo\_contact\_indicator \= 1). It retrieves the latest contact reason and provides a total count of such contacts for each order. |
-| o | Performs several critical data integration and transformation functions: **Integrates Operational and Financial Data:** Joins operational event details from preceding CTEs (adjustments, cancellations, contacts, deliveries, etc.) with corresponding core financial data from order\_contribution\_profit\_fact. **Defines Analysis Scope:** Filters the dataset to include only GHD using managed\_delivery\_ind \= true. **Standardizes Issue Reasons:** Process and categorizes various raw input reasons related to adjustments, free grub, and associated contacts. This uses regexp\_like expressions for keyword and pattern matching, mapping these original reasons to a consistent set of predefined output categories for the adjustment\_reason\_name and fg\_reason fields.  Examples of these standardized categories include 'food temperature', 'incorrect order', 'late order', and 'missed delivery'.  This standardization supports later analysis of cost drivers and allows grouping into broader categories such as 'Logistics Issues'. **Calculates Specific Costs:** Computes the cp\_care\_ticket\_cost by summing care ticket costs related to the diner, driver, restaurant, and internal GH support. Additionally calculates total\_care\_cost directly in this CTE. **Derives Additional Key Indicators:** Assigns care\_cost\_reason and care\_cost\_group values based on standardized reason categorization logic. **Consolidates Data for Subsequent Processing:** Selects and passes through numerous financial components, enriched delivery details, the newly standardized reasons, and all calculated indicators. This comprehensive dataset is then used for the final aggregation and output. |
-| Final Select | The final SELECT takes the processed order-level data from the o CTE and summarizes it by first creating grouping dimensions, then calculating aggregated metrics for each group. It defines key analytical dimensions—key\_cities\_cbsa (city segmentation), care\_cost\_reason\_group (category for the care reason), and shop\_and\_pay\_ind (shop and pay order flag)—then calculates aggregated metrics for each combination, including total\_care\_cost, various cost components, order counts, and cancellation metrics. More details on the final output in [Section 8](#bookmark=id.dvarsg89u42r). |
+| o | Performs several critical data integration and transformation functions: **Integrates Operational and Financial Data:** Joins operational event details from preceding CTEs (adjustments, cancellations, contacts, deliveries, etc.) with corresponding core financial data from order\_contribution\_profit\_fact. **Defines Analysis Scope:** Filters the dataset to include orders within the 6-month window. **Standardizes Issue Reasons:** Process and categorizes various raw input reasons related to adjustments, free grub, and associated contacts. This uses regexp\_like expressions for keyword and pattern matching, mapping these original reasons to a consistent set of predefined output categories for the adjustment\_reason\_name and fg\_reason fields.  Examples of these standardized categories include 'food temperature', 'incorrect order', 'late order', and 'missed delivery'.  This standardization supports later analysis of cost drivers and allows grouping into broader categories such as 'Logistics Issues'. **Calculates Specific Costs:** Computes the cp\_care\_ticket\_cost by summing care ticket costs related to the diner, driver, restaurant, and internal GH support. **Derives Additional Key Indicators:** Calculates lateness indicators including ghd\_late\_ind\_incl\_cancel\_time. Assigns care\_cost\_reason and care\_cost\_group values based on standardized reason categorization logic. **Consolidates Data for Subsequent Processing:** Selects and passes through numerous financial components, enriched delivery details (including CBSA, region, large order indicators), the newly standardized reasons, and all calculated indicators. This comprehensive dataset is then used by subsequent CTEs for further refinement. |
+| o2 | Processes data directly from the o CTE, with its primary function being the creation of a consolidated adjustment\_and\_cancel\_reason\_combined field.  The value for this new field is the cancel\_reason\_name if present; otherwise, it defaults to the adjustment\_reason\_name. This establishes a single, primary reason for orders that might have both cancellation and adjustment data. Most other columns from the o CTE are passed through unmodified. |
+| o3 | Performs the final reason categorization and derives key analytical reason groupings, sourcing data from the preceding stage (o2): **Defines Standardized Groups for Issue Reasons**: Derives adjustment\_group and fg\_group by classifying adjustment\_and\_cancel\_reason\_combined and fg\_reason, respectively, into predefined categories such as 'Logistics Issues', 'Restaurant Issues', or 'Diner Issues'. The mapping logic uses regexp\_like for keyword matching on the reason text and also leverages data from a cancellation reason map table. **Populates Missing fg\_reason:** Fills in missing fg\_reason values by using the main issue reason (adjustment\_and\_cancel\_reason\_combined) when a concession with a financial cost is present, ensuring concessions are still linked to a cause related to the overall order issue. **Consolidates Data for Final Aggregation**: It selects and passes through these newly derived groups and refined reasons, along with numerous other data columns (dates, order attributes, cost components, geographic information, etc.) from the preceding stage. This comprehensive, order-level dataset is then used by the final SELECT statement for aggregation. |
+| Final Select | The final SELECT takes the processed order-level data from the o3 CTE and summarizes it by first creating grouping dimensions, then calculating aggregated metrics for each group. It defines key analytical dimensions—date1, ghd\_ind, delivery\_ind, cancel\_fact\_ind, adjustment\_group, adjustment\_and\_cancel\_reason\_combined, ghd\_late\_ind, ghd\_late\_ind\_incl\_cancel\_time, bundle\_ind, shop\_and\_pay\_ind, automated\_ind, modified\_cbsa\_name, key\_cities\_cbsa, ghd\_delivery\_region\_name, large\_order\_ind, tri\_state\_ind, care\_cost\_reason\_group, and care\_cost\_reason—then calculates extensive aggregated metrics for each combination, including order counts, care costs broken down by component (adjustments, concessions, tickets, redeliveries, refunds), driver pay, tips, and counts of orders with various characteristics. More details on the final output in [Section 8](#bookmark=id.dvarsg89u42r). |
 
 5. # Data Sources Overview
 
@@ -121,6 +123,12 @@ The following table provides a brief summary of each CTE in the order of its app
 * ods.transaction  
   * Transaction table containing payment and refund records, including restaurant refunds processed through PCI.
 
+* integrated\_geo.order\_location  
+  * Geographic table linking orders to their delivery location information including blockgroup geoid.
+
+* integrated\_geo.blockgroup\_dim  
+  * Dimension table containing geographic information at the census block group level, used for geographic segmentation and tri-state area identification.
+
 * integrated\_order.order\_contribution\_profit\_fact  
   * Serves as the primary financial data source for orders. Supplies the cost components used for calculating Fulfillment Care Costs (FCC).  
     * Contains the financial values that quantify the monetary impact of operational events. For example, cp\_diner\_adj represents the value of diner adjustments. The specific events and their underlying reasons are identified in other tables and then linked to these financial values.
@@ -140,8 +148,10 @@ The following table provides a brief summary of each CTE in the order of its app
 | mdf | integrated\_delivery.managed\_delivery\_fact\_v2 |
 | rest\_refunds | ods.transaction |
 | contacts | integrated\_core.ticket\_fact source\_zendesk\_ref.primary\_contact\_reason source\_zendesk\_ref.secondary\_contact\_reason |
-| o | integrated\_order.order\_contribution\_profit\_fact mdf (CTE) cancels (CTE) adj (CTE) ghg (CTE) care\_fg (CTE) contacts (CTE) osmf (CTE) of (CTE) rest\_refunds (CTE) csv\_sandbox.care\_cost\_reasons |
-| Final Select | o (CTE) |
+| o | integrated\_order.order\_contribution\_profit\_fact mdf (CTE) cancels (CTE) adj (CTE) ghg (CTE) care\_fg (CTE) contacts (CTE) osmf (CTE) of (CTE) rest\_refunds (CTE) csv\_sandbox.care\_cost\_reasons integrated\_geo.order\_location integrated\_geo.blockgroup\_dim |
+| o2 | o (CTE) |
+| o3 | o2 (CTE) integrated\_ref.cancellation\_reason\_map |
+| Final Select | o3 (CTE) |
 
 See [Appendix C](#bookmark=id.cw22isy3d1vo) for details on how key fields from each data source are used in the query's CTEs.
 
@@ -212,28 +222,54 @@ Where:
 
 8. # Final Output Description
 
-The final output of the query is an aggregated table that summarizes the order-level data from the o CTE (more on CTEs in [Section 4](#bookmark=id.d3laq9rtvd1t)). Including:
+The final output of the query is an aggregated table that summarizes the order-level data from the o3 CTE (more on CTEs in [Section 4](#bookmark=id.d3laq9rtvd1t)). The query groups by 18 different dimensions and calculates extensive metrics. Including:
 
 | Field | Description |
 | :---- | :---- |
 | **Grouping Dimensions** |  |
-| key\_cities\_cbsa | Categorizes orders by major CBSA (Core Based Statistical Area) locations. **Unique values:** 'New York CBSA Excluding Manhattan', 'New York - Manhattan', 'Chicago-Naperville-Elgin IL-IN-WI', or 'Other CBSA' |
-| care\_cost\_reason\_group | Assigns a single care cost reason group based on the standardized reason categorization. This groups orders into categories like 'logistics issues', 'transmission issues', 'restaurant issues', 'diner issues', 'orders with no care cost', 'other', or 'not grouped'. |
-| shop\_and\_pay\_ind | Boolean flag indicating whether the order was a shop-and-pay order. **Unique values:** TRUE or FALSE |
+| date1 | The delivery date (from order\_contribution\_profit\_fact.delivery\_time\_ct). |
+| ghd\_ind | Indicates whether the order is Grubhub-delivered. **Unique values:** 'ghd' or 'non-ghd' |
+| delivery\_ind | Indicates the delivery type for the order. |
+| cancel\_fact\_ind | Boolean flag indicating whether the order appears in the cancellation fact table. |
+| adjustment\_group | Categorizes the adjustment/cancel reason into high-level groups like 'Logistics Issues', 'Restaurant Issues', 'Diner Issues', or 'not grouped'. |
+| adjustment\_and\_cancel\_reason\_combined | The specific reason text for adjustments or cancellations (consolidated field). |
+| ghd\_late\_ind | Binary indicator (0 or 1) showing if the order was late according to the GHD ETA. |
+| ghd\_late\_ind\_incl\_cancel\_time | Binary indicator (0 or 1) showing if the order was late, including consideration of cancellation time. |
+| bundle\_ind | Boolean flag indicating whether the order was a bundle order. |
+| shop\_and\_pay\_ind | Boolean flag indicating whether the order was a shop-and-pay order. |
+| automated\_ind | Boolean flag indicating whether the contact was automated. |
+| modified\_cbsa\_name | The name of the Core Based Statistical Area (CBSA) for the order. |
+| key\_cities\_cbsa | Categorizes orders by major CBSA locations. **Unique values:** 'New York CBSA Excluding Manhattan', 'New York - Manhattan', 'Chicago-Naperville-Elgin IL-IN-WI', or 'Other CBSA' |
+| ghd\_delivery\_region\_name | The name of the Grubhub delivery region. |
+| large\_order\_ind | Categorizes orders by food and beverage total. **Unique values:** 'Over $1000', 'Over $250', or 'Less than $250' |
+| tri\_state\_ind | Boolean flag indicating whether the order is in the tri-state area. |
+| care\_cost\_reason\_group | Assigns a single care cost reason group. This is determined through logic that considers total care cost, redelivery cost, adjustment\_group, fg\_group, and care\_cost\_group fields. **Unique values:** 'orders with no care cost', 'logistics issues', 'transmission issues', 'restaurant issues', 'diner issues', 'other', or 'not grouped'. |
+| care\_cost\_reason | The specific care cost reason. For missed deliveries, this is 'Missed Delivery'; otherwise it's the coalesced value of adjustment\_and\_cancel\_reason\_combined, fg\_reason, or care\_cost\_reason. |
 | **Aggregated Metrics per Grouping Dimension** |  |
-| orders | The total count of order records. |
-| distinct\_order\_uuid | The count of unique orders. |
-| total\_care\_cost | The sum of the total\_care\_cost values, representing the primary financial outcome. |
-| total\_diner\_adj | The sum of cp\_diner\_adj values (diner adjustments). |
-| total\_care\_concession | The sum of cp\_care\_concession\_awarded\_amount (concessions awarded). |
-| total\_care\_ticket\_cost | The sum of cp\_care\_ticket\_cost (care ticket handling costs). |
-| total\_rest\_refunds | The sum of rr\_refund\_total (restaurant refunds). |
-| ghd\_orders | The count of orders identified as Grubhub Delivered (where managed\_delivery\_ind is TRUE). |
-| ghd\_late\_orders | The count of orders where the ghd\_late\_ind flag is 1 (order was late). |
-| orders\_with\_care\_cost | A specific count of orders where the sum of cp\_diner\_adj, cp\_care\_concession\_awarded\_amount, and cp\_care\_ticket\_cost is less than zero. |
-| osmf\_cancels | The count of orders flagged as cancelled according to the status\_cancelled\_reached\_ind field from order status milestone fact. |
-| bundle\_orders | The count of orders identified as bundle orders. |
-| shop\_and\_pay\_orders | The count of orders identified as shop-and-pay orders. |
+| orders | The count of distinct order\_uuids. |
+| cancels | The count of orders where cancel\_fact\_ind is true. |
+| missed\_revenue\_cp | The sum of cp\_revenue for orders that have status\_cancelled\_reached\_ind = TRUE but cancelled\_order\_ind = FALSE. |
+| cp\_diner\_adj | The sum of cp\_diner\_adj values (diner adjustments). |
+| cp\_care\_concession\_awarded\_amount | The sum of cp\_care\_concession\_awarded\_amount (care concessions awarded). |
+| cp\_care\_ticket\_cost | The sum of cp\_care\_ticket\_cost (care ticket handling costs). |
+| redelivery\_cost | The sum of cp\_redelivery\_cost (redelivery costs). |
+| cp\_grubcash\_care\_concession\_awarded\_amount | The sum of cp\_grubcash\_care\_concession\_awarded\_amount (grubcash concessions). |
+| cp\_grubcare\_refund | The sum of cp\_grub\_care\_refund (Grubhub care refunds). |
+| rr\_refund | The sum of rr\_refund (restaurant refunds). |
+| cp\_total\_care\_cost | The sum of all care cost components: cp\_diner\_adj + cp\_care\_concession\_awarded\_amount + cp\_care\_ticket\_cost + cp\_redelivery\_cost + cp\_grub\_care\_refund. This is the primary financial outcome metric. |
+| ghd\_late\_count | The count of orders where ghd\_late\_ind = 1. |
+| ghd\_orders | The count of orders where ghd\_ind = 'ghd'. |
+| driver\_pay\_cpf | The sum of driver\_pay\_per\_order from the contribution profit fact. |
+| tip | The sum of tip amounts. |
+| true\_up | The sum of true\_up amounts (driver pay true-ups). |
+| orders\_with\_adjustments | The count of orders where cp\_diner\_adj < 0. |
+| orders\_with\_fg | The count of orders where cp\_care\_concession\_awarded\_amount < 0. |
+| orders\_with\_redelivery | The count of orders where cp\_redelivery\_cost < 0. |
+| orders\_with\_gh\_credit | The count of orders where cp\_grubcash\_care\_concession\_awarded\_amount < 0. |
+| orders\_with\_gh\_credit\_refund | The count of orders where cp\_grub\_care\_refund < 0. |
+| orders\_with\_rr\_refund | The count of orders where ABS(rr\_refund) > 0. |
+| orders\_with\_care\_cost | The count of orders where the sum of cp\_diner\_adj + cp\_care\_concession\_awarded\_amount + cp\_care\_ticket\_cost + cp\_redelivery\_cost + cp\_grub\_care\_refund < 0. |
+| cancels\_osmf\_definition | The count of orders where order\_status\_cancel\_ind = true (from order status milestone fact). |
 
 # Appendices
 
@@ -308,5 +344,10 @@ Reading the table alongside the query makes it easier to interpret.
 | o | of (CTE) | order\_uuid modified\_cbsa\_name key\_cities\_cbsa ghd\_delivery\_region\_name large\_order\_ind | \- Joined on order\_uuid. Adds CBSA and geographic categorization, and large order indicators. |
 | o | rest\_refunds (CTE) | order\_uuid rr\_refund\_total | \- Joined on order\_uuid. Adds restaurant refund totals. |
 | o | csv\_sandbox.care\_cost\_reasons ccr | scr (maps to contacts.latest\_contact\_reason) care\_cost\_reason care\_cost\_group | \- Joined on ccr.scr \= contacts.latest\_contact\_reason.  \- Maps specific secondary contact reasons to standardized care\_cost\_reason and care\_cost\_group for categorization. |
-| Final Select | o (CTE) | For Deriving Grouping Dimensions:  To create key\_cities\_cbsa: modified\_cbsa\_name To determine care\_cost\_reason\_group: standardized reason fields (adjustment\_reason\_name, fg\_reason) To identify shop\_and\_pay\_ind: shop\_and\_pay\_ind For Aggregations:  order\_uuid (for counts)  total\_care\_cost, cp\_diner\_adj, cp\_care\_concession\_awarded\_amount, cp\_care\_ticket\_cost, rr\_refund\_total (for sums) managed\_delivery\_ind (to count GHD orders) ghd\_late\_ind (to count late orders) status\_cancelled\_reached\_ind (to count cancellations) bundle\_ind, shop\_and\_pay\_ind (to count order types) | This final block aggregates the detailed, order-level data from the o CTE to produce a summarized report of care cost metrics.  It calculates several key metrics: total orders, distinct orders, sum of total care costs and individual cost components, count of GHD orders, count of late orders, count of orders with any care costs, count of cancellations, and counts of bundle and shop-and-pay orders.  These metrics are grouped by:  1\. key\_cities\_cbsa: CBSA location categorization.  2\. care\_cost\_reason\_group: A high-level categorization of care cost reasons.  3\. shop\_and\_pay\_ind: Flag for shop-and-pay orders. |
+| o | integrated\_geo.order\_location g | order\_uuid dropoff\_blockgroup\_geoid | \- Joined on order\_uuid. Provides geographic location information for the order's dropoff location. |
+| o | integrated\_geo.blockgroup\_dim m | blockgroup\_geoid | \- Joined on blockgroup\_geoid from order\_location. Provides census block group dimension data used for geographic analysis including tri-state area identification. |
+| o2 | o (CTE) | All fields from o, including cancel\_reason\_name, adjustment\_reason\_name | \- Primarily a pass-through CTE that selects most fields from o.  \- Creates adjustment\_and\_cancel\_reason\_combined by coalescing cancel\_reason\_name (if not 'Not Mapped' or null) and adjustment\_reason\_name.  |
+| o3 | o2 (CTE) | All fields from o2 are passed through or used. Key inputs from o2 include: Cost components: cp\_care\_concession\_awarded\_amount cp\_care\_ticket\_cost cp\_diner\_adj cp\_redelivery\_cost cp\_grub\_care\_refund cp\_grubcash\_care\_concession\_awarded\_amount rr\_refund Care reason fields: cancel\_group adjustment\_and\_cancel\_reason\_combined fg\_reason Geographic/categorical fields: modified\_cbsa\_name key\_cities\_cbsa ghd\_delivery\_region\_name large\_order\_ind tri\_state\_ind Other indicators: status\_cancelled\_reached\_ind cancelled\_order\_ind cp\_revenue driver\_pay\_per\_order tip true\_up bundle\_ind shop\_and\_pay\_ind | \- Builds upon o2 by selecting most of its columns and applying further reason categorizations. \- To determine adjustment\_group and fg\_group, the query first attempts to use existing standardized categories from o2.cancel\_group (via the crm lookup table). If a category isn't immediately found, it then analyzes the detailed text of o2.adjustment\_and\_cancel\_reason\_combined or o2.fg\_reason using pattern matching (regexp\_like), with the crm table also providing fallback categories. \- Further refines fg\_reason based on cp\_care\_concession\_awarded\_amount and adjustment\_and\_cancel\_reason\_combined. |
+| o3 | integrated\_ref.cancellation\_reason\_map crm | cancel\_reason\_name cancel\_group | \- Joined on lower(crm.cancel\_reason\_name) \= lower(o2.adjustment\_and\_cancel\_reason\_combined).  \- Provides crm.cancel\_group which is used in the logic for adjustment\_group and fg\_group within this CTE, especially if o2.cancel\_group is not 'Other' or as a general fallback.  |
+| Final Select | o3 | For Deriving Grouping Dimensions:  date1, ghd\_ind, delivery\_ind, cancel\_fact\_ind To create adjustment\_group: uses the derived adjustment\_group from o3 For adjustment\_and\_cancel\_reason\_combined: from o3 For lateness indicators: ghd\_late\_ind, ghd\_late\_ind\_incl\_cancel\_time For order type flags: bundle\_ind, shop\_and\_pay\_ind For automation flag: automated\_ind For geographic dimensions: modified\_cbsa\_name, key\_cities\_cbsa, ghd\_delivery\_region\_name, tri\_state\_ind For order size: large\_order\_ind To determine care\_cost\_reason\_group: total care cost components (cp\_diner\_adj + cp\_care\_concession\_awarded\_amount + cp\_care\_ticket\_cost + cp\_redelivery\_cost + cp\_grub\_care\_refund), cp\_redelivery\_cost, adjustment\_group, fg\_group, care\_cost\_group To determine care\_cost\_reason: cp\_redelivery\_cost, adjustment\_and\_cancel\_reason\_combined, fg\_reason, care\_cost\_reason For Aggregations:  order\_uuid (for distinct counts) cancel\_fact\_ind (for cancellation counts) status\_cancelled\_reached\_ind, cancelled\_order\_ind, cp\_revenue (for missed revenue) All cost components: cp\_diner\_adj, cp\_care\_concession\_awarded\_amount, cp\_care\_ticket\_cost, cp\_redelivery\_cost, cp\_grubcash\_care\_concession\_awarded\_amount, cp\_grub\_care\_refund, rr\_refund ghd\_ind (to count GHD orders) ghd\_late\_ind (to count late orders) driver\_pay\_per\_order, tip, true\_up (for driver compensation) order\_status\_cancel\_ind (for OSMF cancellation definition) | This final block aggregates the detailed, order-level data from the o3 CTE to produce a comprehensive summarized report of care cost metrics.  It calculates extensive metrics including: distinct order counts, cancellation counts, missed revenue, sums of all cost components broken down individually, driver pay and tips, counts of orders with each type of care cost, and counts of late and cancelled orders.  These metrics are grouped by 18 dimensions including:  1\. date1: Delivery date  2\. ghd\_ind: GHD indicator  3\. delivery\_ind: Delivery type  4\. cancel\_fact\_ind: Cancellation fact indicator  5\. adjustment\_group: High-level adjustment reason categorization  6\. adjustment\_and\_cancel\_reason\_combined: Specific reason text  7\. ghd\_late\_ind: Basic lateness indicator  8\. ghd\_late\_ind\_incl\_cancel\_time: Extended lateness indicator  9\. bundle\_ind: Bundle order flag  10\. shop\_and\_pay\_ind: Shop-and-pay flag  11\. automated\_ind: Automated contact flag  12\. modified\_cbsa\_name: CBSA name  13\. key\_cities\_cbsa: Key cities categorization  14\. ghd\_delivery\_region\_name: Delivery region  15\. large\_order\_ind: Order size category  16\. tri\_state\_ind: Tri-state area flag  17\. care\_cost\_reason\_group: High-level care cost categorization  18\. care\_cost\_reason: Specific care cost reason |
 
