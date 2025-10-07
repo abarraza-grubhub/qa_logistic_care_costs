@@ -193,21 +193,21 @@ The table below shows which data sources are filtered by date in each Common Tab
 
 7. # Calculation of total\_care\_cost
 
-The primary financial metric computed by this query is total\_care\_cost. This metric is designed to quantify the direct financial impact on Grubhub from care issues during the order fulfillment process. 
+The primary financial metric computed by this query is total\_care\_cost (referred to as cp\_total\_care\_cost in the final output). This metric is designed to quantify the direct financial impact on Grubhub from care issues during the order fulfillment process. 
 
-The total\_care\_cost is calculated at an order-level in the o CTE by summing key financial components. The calculation logic in the LATEST query is similar to the original but computed directly in the o CTE rather than in a separate o3 CTE.
+Unlike the original query which calculates total\_care\_cost at the order level in the o3 CTE, the LATEST query calculates this metric as an aggregated sum in the final SELECT statement.
 
 The formula used is:
 
 ```sql
-total_care_cost = cp_care_concession_awarded_amount
-                  + cp_care_ticket_cost
-                  + cp_diner_adj
-                  + IF(cp_redelivery_cost IS NULL, 0, cp_redelivery_cost)
-                  + IF(cp_grub_care_refund IS NULL, 0.00, cp_grub_care_refund)
+cp_total_care_cost = SUM(cp_diner_adj 
+                         + cp_care_concession_awarded_amount 
+                         + cp_care_ticket_cost 
+                         + cp_redelivery_cost 
+                         + cp_grub_care_refund)
 ```
 
-Where:
+Where each component is summed across all orders in each grouping dimension combination. The individual cost components are:
 
 * **cp\_care\_concession\_awarded\_amount**:   
 * This represents the monetary value of concessions, such as "Free Grub" or other credits, awarded through customer care due to an issue with an order. 
@@ -216,9 +216,11 @@ Where:
 
 * **cp\_diner\_adj**: This value reflects direct financial adjustments made to a diner's order, commonly for issues like missing or incorrect items, or other partial refunds.
 
-* IF(**cp\_redelivery\_cost** IS NULL, 0, cp\_redelivery\_cost): Represents the cost incurred by Grubhub if an order had to be redelivered to the customer.
+* **cp\_redelivery\_cost**: Represents the cost incurred by Grubhub if an order had to be redelivered to the customer.
 
-* IF(**cp\_grub\_care\_refund** IS NULL, 0.00, cp\_grub\_care\_refund): This component accounts for specific refunds that are processed through care channels and are explicitly funded by Grubhub.
+* **cp\_grub\_care\_refund**: This component accounts for specific refunds that are processed through care channels and are explicitly funded by Grubhub.
+
+Note: In the LATEST query, NULL values in cp\_redelivery\_cost and cp\_grub\_care\_refund are handled implicitly by the SUM function (which treats NULL as 0 in aggregation), whereas the original query explicitly converts NULL to 0 at the order level using IF statements.
 
 8. # Final Output Description
 
